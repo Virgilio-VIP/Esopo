@@ -125,8 +125,9 @@ def main():
                 if not df_grid.empty: 
                     st.dataframe(
                         df_grid.style.format({
-                            'GMD Médio': '{:.2f}',
-                            'GPD Médio': '{:.2f}',
+                            'GMD Médio': '{:.3f}',
+                            'GPD Médio': '{:.3f}',
+                            'Idade Pesagem(d)': '{:.0f}',
                             'Peso Médio': '{:.1f} kg'
                         }), 
                         use_container_width=True, 
@@ -139,7 +140,7 @@ def main():
             # Sub-filters for all perspectives
             f_col1, f_col2 = st.columns([1, 2])
             with f_col1:
-                periodo_meses = st.slider("Período de Análise (Meses):", 1, 60, 12, key="peso_slider")
+                periodo_meses = st.slider("Período de Análise (Meses):", 0, 60, 12, key="peso_slider")
 
             if sub_page == "📤 Vendas":
                 st.subheader("🔎 Performance de Animais Vendidos")
@@ -176,7 +177,8 @@ def main():
                                CASE WHEN cf.origem = 'N' THEN cf.dt_nascimento ELSE cf.dt_compra END as di,
                                DATEDIFF(day, CASE WHEN cf.origem = 'N' THEN cf.dt_nascimento ELSE cf.dt_compra END, s.dtv) as td,
                                CASE WHEN cf.origem = 'N' THEN 'NASCIMENTO: ' + CAST(FORMAT(cf.dt_nascimento, 'MM/yyyy') AS VARCHAR) ELSE e.grp END as og,
-                               ISNULL(e.pe, 40.0) as pi
+                               ISNULL(e.pe, 40.0) as pi,
+                               e.dte as data_compra_raw, e.forn as fornecedor_raw
                         FROM cad_fichario cf
                         JOIN Sale s ON cf.cod_animal = s.cod_animal
                         LEFT JOIN Entry e ON cf.cod_animal = e.cod_animal
@@ -191,6 +193,29 @@ def main():
                         st.plotly_chart(px.sunburst(df, path=['comp', 'og'], values='pv', color='gmd', 
                                                    color_continuous_scale='RdYlGn', template="plotly_dark",
                                                    title="Hierarquia de Grupos: Comprador > Origem"), use_container_width=True)
+                        
+                        st.markdown("---")
+                        st.subheader("🌲 Árvore de Decomposição (Estilo PowerBI)")
+                        st.info("💡 Clique nos blocos para detalhar os níveis (Venda -> Cliente -> Compra -> Fornecedor)")
+                        
+                        df_tree = df.copy()
+                        df_tree['Venda'] = df_tree['dtv'].dt.strftime('%d/%m/%Y')
+                        df_tree['Cliente'] = df_tree['comp']
+                        df_tree['Compra'] = pd.to_datetime(df_tree['data_compra_raw']).dt.strftime('%d/%m/%Y').fillna('NASCIMENTO')
+                        df_tree['Fornecedor'] = df_tree['fornecedor_raw'].fillna('ORIGEM INTERNA')
+                        df_tree['Qtd'] = 1
+                        
+                        fig_tree = px.icicle(
+                            df_tree,
+                            path=[px.Constant("Total Vendas"), 'Cliente', 'Venda', 'Fornecedor', 'Compra'],
+                            values='Qtd',
+                            color='gmd',
+                            color_continuous_scale='RdYlGn',
+                            template="plotly_dark",
+                            title="Decomposição da Cadeia de Venda (Cor = GMD)"
+                        )
+                        fig_tree.update_traces(textinfo="label+value")
+                        st.plotly_chart(fig_tree, use_container_width=True)
                         
                         st.subheader("📋 Detalhamento da Performance")
                         res = df.groupby(['comp', 'og']).agg({'id_animal': 'count', 'pv': 'mean', 'td': 'mean', 'gt': 'mean', 'gmd': 'mean'}).reset_index()
@@ -264,12 +289,12 @@ def main():
         elif page == "📋 Ficha de Animais":
             st.subheader("📉 Giro de Estoque Mensal")
             c1, c2 = st.columns([2, 1])
-            with c1: periodo = st.slider("Exibir (Meses):", 6, 36, 12)
+            with c1: periodo = st.slider("Exibir (Meses):", 0, 36, 12)
             with c2: segregate = st.toggle("Detalhamento Individual", value=False)
             
             # (Reuse existing logic for Ficha de Animais)
-            query_e = f"SELECT FORMAT(data, 'yyyy-MM-01') as Mes, 'COMPRA' as Tipo, COUNT(*) as Qtd, SUM(t.unidade_animal) as UA FROM cad_compra cc JOIN cad_fichario c ON cc.cod_animal = c.cod_animal JOIN Tab_categoria t ON c.cod_categoria = t.cod_categoria WHERE c.cod_fazenda IN ({farm_ids_str}) GROUP BY FORMAT(data, 'yyyy-MM-01') UNION ALL SELECT FORMAT(dt_nascimento, 'yyyy-MM-01') as Mes, 'NASCIMENTO' as Tipo, COUNT(*) as Qtd, SUM(t.unidade_animal) as UA FROM cad_fichario c JOIN Tab_categoria t ON c.cod_categoria = t.cod_categoria WHERE c.cod_fazenda IN ({farm_ids_str}) GROUP BY FORMAT(dt_nascimento, 'yyyy-MM-01')"
-            query_s = f"SELECT FORMAT(data, 'yyyy-MM-01') as Mes, 'MORTE' as Tipo, COUNT(*) as Qtd, SUM(t.unidade_animal) as UA FROM cad_morte cm JOIN cad_fichario c ON cm.cod_animal = c.cod_animal JOIN Tab_categoria t ON c.cod_categoria = t.cod_categoria WHERE c.cod_fazenda IN ({farm_ids_str}) GROUP BY FORMAT(data, 'yyyy-MM-01') UNION ALL SELECT FORMAT(data, 'yyyy-MM-01') as Mes, 'VENDA' as Tipo, COUNT(*) as Qtd, SUM(t.unidade_animal) as UA FROM cad_venda cv JOIN cad_fichario c ON cv.cod_animal = c.cod_animal JOIN Tab_categoria t ON c.cod_categoria = t.cod_categoria WHERE c.cod_fazenda IN ({farm_ids_str}) GROUP BY FORMAT(data, 'yyyy-MM-01')"
+            query_e = f"SELECT FORMAT(data, 'yyyy-MM-01') as Mes, 'COMPRA' as Tipo, COUNT(*) as Qtd, SUM(t.unidade_animal) as UA FROM cad_compra cc JOIN cad_fichario c ON cc.cod_animal = c.cod_animal JOIN Tab_categoria t ON c.cod_categoria = t.cod_categoria WHERE c.origem = 'C' AND c.cod_fazenda IN ({farm_ids_str}) GROUP BY FORMAT(data, 'yyyy-MM-01') UNION ALL SELECT FORMAT(dt_nascimento, 'yyyy-MM-01') as Mes, 'NASCIMENTO' as Tipo, COUNT(*) as Qtd, SUM(t.unidade_animal) as UA FROM cad_fichario c JOIN Tab_categoria t ON c.cod_categoria = t.cod_categoria WHERE c.cod_fazenda IN ({farm_ids_str}) GROUP BY FORMAT(dt_nascimento, 'yyyy-MM-01')"
+            query_s = f"SELECT FORMAT(data, 'yyyy-MM-01') as Mes, 'MORTE' as Tipo, COUNT(*) as Qtd, SUM(t.unidade_animal) as UA FROM cad_morte cm JOIN cad_fichario c ON cm.cod_animal = c.cod_animal JOIN Tab_categoria t ON c.cod_categoria = t.cod_categoria WHERE c.origem = 'N' AND c.cod_fazenda IN ({farm_ids_str}) GROUP BY FORMAT(data, 'yyyy-MM-01') UNION ALL SELECT FORMAT(data, 'yyyy-MM-01') as Mes, 'VENDA' as Tipo, COUNT(*) as Qtd, SUM(t.unidade_animal) as UA FROM cad_venda cv JOIN cad_fichario c ON cv.cod_animal = c.cod_animal JOIN Tab_categoria t ON c.cod_categoria = t.cod_categoria WHERE c.cod_fazenda IN ({farm_ids_str}) GROUP BY FORMAT(data, 'yyyy-MM-01')"
             
             df_e, df_s = pd.read_sql(query_e, conn), pd.read_sql(query_s, conn)
             df_all = pd.concat([df_e, df_s])
@@ -299,7 +324,7 @@ def main():
                 ql.append(tq); ul.append(tu)
                 tq -= row['SL_Q']; tu -= row['SL_UA']
             
-            sum_df['REBANHO'] = ql[::-1]; sum_df['UA'] = ul[::-1]
+            sum_df['REBANHO'] = list(reversed(ql)); sum_df['UA'] = list(reversed(ul))
             df_p = sum_df.tail(periodo)
 
             fig = go.Figure()
