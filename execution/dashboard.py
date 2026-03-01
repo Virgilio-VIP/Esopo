@@ -1,4 +1,5 @@
 import streamlit as st
+import streamlit.components.v1 as components
 import pandas as pd
 import pyodbc
 import os
@@ -7,13 +8,725 @@ import plotly.graph_objects as go
 from dotenv import load_dotenv
 
 # Page config
-st.set_page_config(page_title="Esopo Dashboard", layout="wide")
+st.set_page_config(
+    page_title="Esopo Dashboard", 
+    layout="wide",
+    initial_sidebar_state="expanded",
+    page_icon="🐄"
+)
 
-# Styling
+# Styling — Premium Glassmorphism Theme
 st.markdown("""
     <style>
-    .main { background-color: #0f1116; color: #ffffff; }
-    .stMetric { background: rgba(255, 255, 255, 0.05); padding: 20px; border-radius: 10px; border: 1px solid rgba(255, 255, 255, 0.1); }
+    @import url('https://fonts.googleapis.com/css2?family=Outfit:wght@300;400;500;600;700&display=swap');
+    @import url('https://fonts.googleapis.com/css2?family=Material+Symbols+Outlined:opsz,wght,FILL,GRAD@24,400,0,0');
+
+    :root {
+        /* Core Palette — Rural Premium */
+        --primary-green: #064e3b;
+        --primary-green-light: #059669;
+        --accent-magenta: #be185d;
+        --accent-magenta-glow: rgba(190, 24, 93, 0.25);
+        --accent-amber: #d97706;
+
+        /* Grays */
+        --bg-screen: #f1f5f9;
+        --bg-panel: #1e293b;
+        --bg-panel-alt: #0f172a;
+        --surface-white: #ffffff;
+        --text-primary: #0f172a;
+        --text-secondary: #475569;
+        --text-muted: #94a3b8;
+        --text-on-dark: #f8fafc;
+
+        /* Glass */
+        --glass-bg: rgba(255, 255, 255, 0.75);
+        --glass-bg-strong: rgba(255, 255, 255, 0.88);
+        --glass-border: rgba(255, 255, 255, 0.4);
+        --glass-blur: 20px;
+
+        /* Shadows */
+        --shadow-sm: 0 2px 8px rgba(0, 0, 0, 0.04);
+        --shadow-md: 0 8px 24px rgba(0, 0, 0, 0.06);
+        --shadow-lg: 0 16px 48px rgba(0, 0, 0, 0.08);
+        --shadow-glow-green: 0 4px 20px rgba(6, 78, 59, 0.15);
+        --shadow-glow-magenta: 0 4px 20px rgba(190, 24, 93, 0.15);
+
+        /* Radius */
+        --radius-sm: 10px;
+        --radius-md: 16px;
+        --radius-lg: 24px;
+        --radius-xl: 32px;
+    }
+
+    /* ============ GLOBAL ============ */
+    *, *::before, *::after {
+        font-family: 'Outfit', sans-serif !important;
+    }
+
+    .main {
+        background: var(--bg-screen) !important;
+        color: var(--text-primary);
+    }
+
+    body, [data-testid="stAppViewContainer"] {
+        font-family: 'Outfit', sans-serif !important;
+        background: var(--bg-screen);
+    }
+
+    /* Material Symbols helper */
+    .mat-icon {
+        font-family: 'Material Symbols Outlined' !important;
+        font-weight: normal;
+        font-style: normal;
+        font-size: 22px;
+        display: inline-block;
+        line-height: 1;
+        text-transform: none;
+        letter-spacing: normal;
+        word-wrap: normal;
+        white-space: nowrap;
+        direction: ltr;
+        vertical-align: middle;
+        -webkit-font-smoothing: antialiased;
+    }
+
+    /* ============ SIDEBAR — Premium Glass ============ */
+    section[data-testid="stSidebar"] {
+        background: linear-gradient(180deg, var(--bg-panel-alt) 0%, var(--bg-panel) 100%) !important;
+        border-right: 1px solid rgba(255, 255, 255, 0.06) !important;
+        box-shadow: 4px 0 24px rgba(0, 0, 0, 0.15);
+    }
+
+    section[data-testid="stSidebar"] .stMarkdown,
+    section[data-testid="stSidebar"] label,
+    section[data-testid="stSidebar"] p,
+    section[data-testid="stSidebar"] span {
+        color: var(--text-on-dark) !important;
+    }
+
+    /* Sidebar Title Area */
+    section[data-testid="stSidebar"] [data-testid="stMarkdownContainer"] h1,
+    section[data-testid="stSidebar"] [data-testid="stMarkdownContainer"] h2,
+    section[data-testid="stSidebar"] [data-testid="stMarkdownContainer"] h3 {
+        color: var(--text-on-dark) !important;
+        text-shadow: 0 0 20px rgba(6, 78, 59, 0.3);
+    }
+
+    /* Sidebar Radio — Navigation Items */
+    section[data-testid="stSidebar"] div[role="radiogroup"] {
+        gap: 4px;
+    }
+
+    section[data-testid="stSidebar"] div[role="radiogroup"] label {
+        background: rgba(255, 255, 255, 0.04) !important;
+        border-radius: var(--radius-sm) !important;
+        padding: 12px 16px !important;
+        transition: all 0.3s cubic-bezier(0.4, 0, 0.2, 1) !important;
+        border: 1px solid transparent !important;
+        margin-bottom: 2px;
+    }
+
+    section[data-testid="stSidebar"] div[role="radiogroup"] label:hover {
+        background: rgba(255, 255, 255, 0.08) !important;
+        border-color: rgba(255, 255, 255, 0.1) !important;
+        transform: translateX(4px);
+    }
+
+    section[data-testid="stSidebar"] div[role="radiogroup"] label[data-checked="true"],
+    section[data-testid="stSidebar"] div[role="radiogroup"] label[data-baseweb="radio"]:has(input:checked) {
+        background: rgba(6, 78, 59, 0.25) !important;
+        border-color: var(--primary-green-light) !important;
+        box-shadow: 0 0 12px rgba(6, 78, 59, 0.2);
+    }
+
+    /* Sidebar Info Box */
+    section[data-testid="stSidebar"] [data-testid="stAlert"] {
+        background: rgba(6, 78, 59, 0.15) !important;
+        border: 1px solid rgba(6, 78, 59, 0.3) !important;
+        border-radius: var(--radius-sm) !important;
+        backdrop-filter: blur(8px);
+        color: var(--text-on-dark) !important;
+    }
+
+    /* Sidebar Divider */
+    section[data-testid="stSidebar"] hr {
+        border-color: rgba(255, 255, 255, 0.08) !important;
+        margin: 16px 0 !important;
+    }
+
+    /* ============ METRIC CARDS — Glass + Gradient Accent ============ */
+    div[data-testid="stMetric"] {
+        background: var(--glass-bg-strong);
+        backdrop-filter: blur(var(--glass-blur));
+        -webkit-backdrop-filter: blur(var(--glass-blur));
+        border: 1px solid var(--glass-border);
+        border-radius: var(--radius-md);
+        padding: 24px 20px;
+        box-shadow: var(--shadow-md);
+        transition: all 0.4s cubic-bezier(0.4, 0, 0.2, 1);
+        position: relative;
+        overflow: hidden;
+        animation: fadeSlideUp 0.6s ease-out;
+    }
+
+    /* Gradient accent bar on left side */
+    div[data-testid="stMetric"]::before {
+        content: '';
+        position: absolute;
+        left: 0;
+        top: 0;
+        bottom: 0;
+        width: 4px;
+        background: linear-gradient(180deg, var(--primary-green) 0%, var(--accent-magenta) 100%);
+        border-radius: 4px 0 0 4px;
+    }
+
+    div[data-testid="stMetric"]:hover {
+        transform: translateY(-6px);
+        box-shadow: var(--shadow-lg), var(--shadow-glow-green);
+    }
+
+    div[data-testid="stMetric"] [data-testid="stMetricLabel"] {
+        font-size: 0.82rem !important;
+        font-weight: 500 !important;
+        color: var(--text-secondary) !important;
+        text-transform: uppercase;
+        letter-spacing: 0.5px;
+    }
+
+    div[data-testid="stMetric"] [data-testid="stMetricValue"] {
+        font-size: 1.8rem !important;
+        font-weight: 700 !important;
+        color: var(--text-primary) !important;
+    }
+
+    /* ============ BUTTONS — Premium ============ */
+    .stButton > button {
+        background: linear-gradient(135deg, var(--primary-green) 0%, var(--primary-green-light) 100%) !important;
+        color: white !important;
+        border: none !important;
+        border-radius: var(--radius-sm) !important;
+        padding: 10px 24px !important;
+        font-weight: 600 !important;
+        letter-spacing: 0.3px;
+        box-shadow: var(--shadow-glow-green);
+        transition: all 0.3s cubic-bezier(0.4, 0, 0.2, 1) !important;
+    }
+
+    .stButton > button:hover {
+        transform: translateY(-2px) !important;
+        box-shadow: var(--shadow-glow-green), 0 8px 24px rgba(6, 78, 59, 0.2) !important;
+    }
+
+    /* ============ MULTISELECT & INPUTS ============ */
+    .stMultiSelect > div {
+        border-radius: var(--radius-sm) !important;
+    }
+
+    .stMultiSelect [data-baseweb="tag"] {
+        background: var(--primary-green) !important;
+        border-radius: 8px !important;
+    }
+
+    div[data-baseweb="select"] > div {
+        border-radius: var(--radius-sm) !important;
+        border-color: #e2e8f0 !important;
+        transition: border-color 0.3s, box-shadow 0.3s !important;
+    }
+
+    div[data-baseweb="select"] > div:focus-within {
+        border-color: var(--primary-green-light) !important;
+        box-shadow: 0 0 0 3px rgba(6, 78, 59, 0.15) !important;
+    }
+
+    /* ============ SLIDER ============ */
+    .stSlider [data-baseweb="slider"] [role="slider"] {
+        background: var(--primary-green) !important;
+    }
+
+    .stSlider [data-baseweb="slider"] div[data-testid="stTickBar"] {
+        background: var(--primary-green-light) !important;
+    }
+
+    /* ============ RADIO (Main Content) ============ */
+    .stRadio > div[role="radiogroup"] label {
+        background: var(--glass-bg) !important;
+        backdrop-filter: blur(10px);
+        border: 1px solid var(--glass-border) !important;
+        border-radius: var(--radius-sm) !important;
+        padding: 10px 18px !important;
+        transition: all 0.3s cubic-bezier(0.4, 0, 0.2, 1) !important;
+    }
+
+    .stRadio > div[role="radiogroup"] label:hover {
+        border-color: var(--primary-green-light) !important;
+        box-shadow: var(--shadow-sm);
+    }
+
+    /* ============ TITLES & TYPOGRAPHY ============ */
+    h1 {
+        color: var(--primary-green) !important;
+        font-weight: 700 !important;
+        font-size: 2rem !important;
+        letter-spacing: -0.5px;
+    }
+
+    h2, h3 {
+        color: var(--primary-green) !important;
+        font-weight: 600 !important;
+    }
+
+    h4 {
+        color: var(--text-secondary) !important;
+        font-weight: 600 !important;
+        text-transform: uppercase;
+        letter-spacing: 0.5px;
+        font-size: 0.9rem !important;
+    }
+
+    /* ============ SECTION HEADERS — Custom ============ */
+    .section-header {
+        display: flex;
+        align-items: center;
+        gap: 12px;
+        margin-bottom: 16px;
+        padding-bottom: 12px;
+        border-bottom: 2px solid rgba(6, 78, 59, 0.1);
+    }
+
+    .section-header .icon-box {
+        width: 40px;
+        height: 40px;
+        border-radius: 12px;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        font-size: 20px;
+    }
+
+    .icon-green {
+        background: linear-gradient(135deg, rgba(6, 78, 59, 0.12), rgba(5, 150, 105, 0.12));
+        color: var(--primary-green);
+    }
+
+    .icon-magenta {
+        background: linear-gradient(135deg, rgba(190, 24, 93, 0.12), rgba(219, 39, 119, 0.12));
+        color: var(--accent-magenta);
+    }
+
+    .icon-amber {
+        background: linear-gradient(135deg, rgba(217, 119, 6, 0.12), rgba(245, 158, 11, 0.12));
+        color: var(--accent-amber);
+    }
+
+    .section-title {
+        font-size: 1.1rem;
+        font-weight: 600;
+        color: var(--text-primary);
+    }
+
+    .section-subtitle {
+        font-size: 0.8rem;
+        color: var(--text-muted);
+    }
+
+    /* ============ DATA TABLES — Modern ============ */
+    [data-testid="stTable"],
+    [data-testid="stDataFrame"] {
+        border-radius: var(--radius-md) !important;
+        overflow: hidden !important;
+        box-shadow: var(--shadow-md) !important;
+    }
+
+    [data-testid="stDataFrame"] > div {
+        border-radius: var(--radius-md) !important;
+    }
+
+    /* ============ TABS ============ */
+    .stTabs [data-baseweb="tab-list"] {
+        background: var(--glass-bg);
+        backdrop-filter: blur(10px);
+        border-radius: var(--radius-sm);
+        padding: 4px;
+        gap: 4px;
+    }
+
+    .stTabs [data-baseweb="tab"] {
+        border-radius: 8px !important;
+        font-weight: 500;
+        transition: all 0.3s !important;
+    }
+
+    .stTabs [aria-selected="true"] {
+        background: var(--primary-green) !important;
+        color: white !important;
+    }
+
+    /* ============ INFO / WARNING / ERROR ============ */
+    [data-testid="stAlert"] {
+        border-radius: var(--radius-sm) !important;
+        backdrop-filter: blur(8px);
+    }
+
+    /* ============ CONTAINERS ============ */
+    [data-testid="stVerticalBlock"] > div:has(> [data-testid="stMetric"]) {
+        gap: 16px;
+    }
+
+    /* Dividers */
+    hr {
+        border: none !important;
+        border-top: 2px solid rgba(0, 0, 0, 0.04) !important;
+        margin: 24px 0 !important;
+    }
+
+    /* ============ ANIMATIONS ============ */
+    @keyframes fadeSlideUp {
+        from {
+            opacity: 0;
+            transform: translateY(16px);
+        }
+        to {
+            opacity: 1;
+            transform: translateY(0);
+        }
+    }
+
+    @keyframes fadeIn {
+        from { opacity: 0; }
+        to { opacity: 1; }
+    }
+
+    /* Animate all main containers */
+    .main .block-container {
+        animation: fadeIn 0.5s ease-out;
+    }
+
+    /* ============ SCROLLBAR ============ */
+    ::-webkit-scrollbar {
+        width: 6px;
+        height: 6px;
+    }
+
+    ::-webkit-scrollbar-track {
+        background: transparent;
+    }
+
+    ::-webkit-scrollbar-thumb {
+        background: #cbd5e1;
+        border-radius: 10px;
+    }
+
+    ::-webkit-scrollbar-thumb:hover {
+        background: #94a3b8;
+    }
+
+    /* ============ CUSTOM LOGO BANNER ============ */
+    .esopo-brand {
+        text-align: center;
+        padding: 8px 0 16px 0;
+    }
+
+    .esopo-logo-box {
+        width: 56px;
+        height: 56px;
+        margin: 0 auto 12px;
+        background: linear-gradient(135deg, var(--primary-green) 0%, var(--accent-magenta) 100%);
+        border-radius: 16px;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        font-size: 28px;
+        box-shadow: 0 8px 24px rgba(6, 78, 59, 0.25);
+    }
+
+    .esopo-brand-title {
+        font-size: 1.4rem;
+        font-weight: 700;
+        color: var(--text-on-dark) !important;
+        letter-spacing: 1px;
+    }
+
+    .esopo-brand-subtitle {
+        font-size: 0.72rem;
+        color: var(--text-muted);
+        text-transform: uppercase;
+        letter-spacing: 2px;
+        margin-top: 2px;
+    }
+
+    /* ============ STAT HIGHLIGHT CARD (custom HTML) ============ */
+    .stat-highlight {
+        background: linear-gradient(135deg, var(--primary-green) 0%, rgba(6, 78, 59, 0.85) 100%);
+        border-radius: var(--radius-md);
+        padding: 20px;
+        color: white;
+        box-shadow: var(--shadow-glow-green);
+        position: relative;
+        overflow: hidden;
+    }
+
+    .stat-highlight::after {
+        content: '';
+        position: absolute;
+        top: -50%;
+        right: -50%;
+        width: 100%;
+        height: 100%;
+        background: radial-gradient(circle, rgba(255,255,255,0.08) 0%, transparent 70%);
+        pointer-events: none;
+    }
+
+    .stat-highlight .stat-value {
+        font-size: 2rem;
+        font-weight: 700;
+    }
+
+    .stat-highlight .stat-label {
+        font-size: 0.8rem;
+        opacity: 0.8;
+        text-transform: uppercase;
+        letter-spacing: 1px;
+    }
+
+    /* ============ TOGGLE ============ */
+    .stToggle label span {
+        font-weight: 500 !important;
+    }
+
+    /* ============ EXPANDER ============ */
+    [data-testid="stExpander"] {
+        background: var(--glass-bg-strong);
+        backdrop-filter: blur(var(--glass-blur));
+        border: 1px solid var(--glass-border) !important;
+        border-radius: var(--radius-md) !important;
+        box-shadow: var(--shadow-sm);
+    }
+
+    /* ============ CUSTOM SIDEBAR NAV ITEMS ============ */
+    .nav-custom-item {
+        display: flex;
+        align-items: center;
+        gap: 14px;
+        padding: 13px 16px;
+        border-radius: 12px;
+        cursor: pointer;
+        transition: all 0.3s cubic-bezier(0.4, 0, 0.2, 1);
+        border: 1px solid transparent;
+        margin-bottom: 4px;
+        text-decoration: none;
+        color: #94a3b8;
+        font-size: 0.9rem;
+        font-weight: 500;
+        position: relative;
+        overflow: hidden;
+    }
+
+    .nav-custom-item:hover {
+        background: rgba(255, 255, 255, 0.06);
+        color: #e2e8f0;
+        border-color: rgba(255, 255, 255, 0.08);
+        transform: translateX(4px);
+    }
+
+    .nav-custom-item.active {
+        background: rgba(6, 78, 59, 0.2);
+        border-color: var(--primary-green-light);
+        color: #f8fafc;
+        font-weight: 600;
+        box-shadow: 0 0 16px rgba(5, 150, 105, 0.15);
+    }
+
+    .nav-custom-item.active::before {
+        content: '';
+        position: absolute;
+        left: 0;
+        top: 20%;
+        bottom: 20%;
+        width: 3px;
+        background: linear-gradient(180deg, var(--primary-green-light), var(--accent-magenta));
+        border-radius: 0 3px 3px 0;
+    }
+
+    .nav-custom-item .nav-icon {
+        width: 36px;
+        height: 36px;
+        min-width: 36px;
+        border-radius: 10px;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        transition: all 0.3s;
+    }
+
+    .nav-custom-item .nav-icon .mat-icon {
+        font-size: 20px;
+    }
+
+    .nav-custom-item:not(.active) .nav-icon {
+        background: rgba(255, 255, 255, 0.05);
+        color: #94a3b8;
+    }
+
+    .nav-custom-item.active .nav-icon {
+        background: linear-gradient(135deg, var(--primary-green), var(--primary-green-light));
+        color: white;
+        box-shadow: 0 4px 12px rgba(5, 150, 105, 0.3);
+    }
+
+    .nav-custom-item .nav-text {
+        flex: 1;
+        line-height: 1.3;
+    }
+
+    .nav-custom-item .nav-label {
+        font-size: 0.82rem;
+    }
+
+    .nav-custom-item .nav-desc {
+        font-size: 0.68rem;
+        color: #64748b;
+        font-weight: 400;
+    }
+
+    .nav-custom-item.active .nav-desc {
+        color: #94a3b8;
+    }
+
+    /* Section label in sidebar */
+    .sidebar-section-label {
+        font-size: 0.68rem;
+        text-transform: uppercase;
+        color: #64748b;
+        letter-spacing: 1.5px;
+        padding: 0 16px;
+        margin-bottom: 8px;
+        font-weight: 600;
+    }
+
+    /* ============ MULTISELECT PILLS — Glass ============ */
+    .stMultiSelect [data-baseweb="tag"] {
+        background: rgba(6, 78, 59, 0.18) !important;
+        backdrop-filter: blur(6px);
+        border: 1px solid rgba(5, 150, 105, 0.3) !important;
+        border-radius: 10px !important;
+        color: var(--primary-green) !important;
+        font-weight: 500 !important;
+        padding: 4px 10px !important;
+        transition: all 0.2s ease !important;
+    }
+
+    .stMultiSelect [data-baseweb="tag"]:hover {
+        background: rgba(6, 78, 59, 0.28) !important;
+        border-color: var(--primary-green-light) !important;
+        box-shadow: 0 2px 8px rgba(6, 78, 59, 0.15);
+    }
+
+    .stMultiSelect [data-baseweb="tag"] span {
+        color: var(--primary-green) !important;
+        font-weight: 500 !important;
+    }
+
+    /* Tag close button */
+    .stMultiSelect [data-baseweb="tag"] [role="presentation"] {
+        color: var(--primary-green-light) !important;
+    }
+
+    /* Hide default radio in sidebar (we use custom nav) */
+    section[data-testid="stSidebar"] .stRadio {
+        display: none !important;
+    }
+
+    /* ============ SIDEBAR NAV BUTTONS — Premium Style ============ */
+    section[data-testid="stSidebar"] .stButton {
+        margin-bottom: 4px !important;
+    }
+
+    section[data-testid="stSidebar"] .stButton > button {
+        background: rgba(255, 255, 255, 0.03) !important;
+        color: #94a3b8 !important;
+        border: 1px solid transparent !important;
+        border-radius: 12px !important;
+        padding: 14px 16px 14px 56px !important;
+        font-size: 0.85rem !important;
+        font-weight: 500 !important;
+        text-align: left !important;
+        justify-content: flex-start !important;
+        box-shadow: none !important;
+        transition: all 0.3s cubic-bezier(0.4, 0, 0.2, 1) !important;
+        letter-spacing: 0.2px !important;
+        position: relative !important;
+        overflow: visible !important;
+        min-height: 48px !important;
+    }
+
+    /* Icon container via ::before */
+    section[data-testid="stSidebar"] .stButton > button::before {
+        font-family: 'Material Symbols Outlined' !important;
+        font-size: 20px;
+        font-weight: normal;
+        font-style: normal;
+        position: absolute;
+        left: 12px;
+        top: 50%;
+        transform: translateY(-50%);
+        width: 32px;
+        height: 32px;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        border-radius: 8px;
+        background: rgba(255, 255, 255, 0.05);
+        color: #64748b;
+        transition: all 0.3s;
+    }
+
+    section[data-testid="stSidebar"] .stButton > button:hover {
+        background: rgba(255, 255, 255, 0.07) !important;
+        color: #e2e8f0 !important;
+        border-color: rgba(255, 255, 255, 0.08) !important;
+        transform: translateX(4px) !important;
+        box-shadow: none !important;
+    }
+
+    section[data-testid="stSidebar"] .stButton > button:hover::before {
+        background: rgba(255, 255, 255, 0.1);
+        color: #e2e8f0;
+    }
+
+    section[data-testid="stSidebar"] .stButton > button:active,
+    section[data-testid="stSidebar"] .stButton > button:focus {
+        box-shadow: none !important;
+        outline: none !important;
+    }
+
+    /* --- Icon assignment by data-nav attribute (set via JS) --- */
+    section[data-testid="stSidebar"] button[data-nav="resumo"]::before {
+        content: 'dashboard' !important;
+    }
+    section[data-testid="stSidebar"] button[data-nav="peso"]::before {
+        content: 'monitoring' !important;
+    }
+    section[data-testid="stSidebar"] button[data-nav="ficha"]::before {
+        content: 'inventory_2' !important;
+    }
+    /* Fallback: default icon if data-nav not yet set */
+    section[data-testid="stSidebar"] .stButton > button:not([data-nav])::before {
+        content: 'radio_button_unchecked';
+    }
+
+    /* ============ FARM SELECTOR LABEL ============ */
+    .farm-selector-glass {
+        background: var(--glass-bg-strong);
+        backdrop-filter: blur(var(--glass-blur));
+        border: 1px solid var(--glass-border);
+        border-radius: var(--radius-md);
+        padding: 16px 20px;
+        box-shadow: var(--shadow-sm);
+        margin-bottom: 16px;
+    }
+
     </style>
     """, unsafe_allow_html=True)
 
@@ -30,14 +743,126 @@ def format_br(val):
     return f"{float(val):,.2f}".replace(",", "X").replace(".", ",").replace("X", ".")
 
 def main():
-    # --- SIDEBAR NAVIGATION ---
-    st.sidebar.title("🧭 Navegação")
-    page = st.sidebar.radio("Ir para:", ["🏠 Resumo Geral", "📊 Evolução de Peso", "📋 Ficha de Animais"])
+    # --- Initialize page state ---
+    if "current_page" not in st.session_state:
+        st.session_state.current_page = "resumo"
     
-    st.sidebar.divider()
-    st.sidebar.info("Projeto Esopo v1.0\nGestão de Pecuária de Precisão")
+    # Navigation definitions
+    nav_items = [
+        {"key": "resumo",    "icon": "dashboard",   "label": "Resumo Geral",    "desc": "Visão consolidada"},
+        {"key": "peso",      "icon": "monitoring",   "label": "Evolução de Peso", "desc": "Performance zootécnica"},
+        {"key": "ficha",     "icon": "inventory_2",  "label": "Ficha de Animais", "desc": "Giro de estoque"},
+    ]
+    
+    # --- SIDEBAR — Premium Brand ---
+    st.sidebar.markdown("""
+        <div class="esopo-brand">
+            <div class="esopo-logo-box">
+                <span class="mat-icon" style="font-size:28px; color:white;">pets</span>
+            </div>
+            <div class="esopo-brand-title">ESOPO</div>
+            <div class="esopo-brand-subtitle">Pecuária de Precisão</div>
+        </div>
+    """, unsafe_allow_html=True)
+    
+    st.sidebar.markdown("---")
+    
+    # --- Custom Navigation with Material Icons ---
+    st.sidebar.markdown('<div class="sidebar-section-label">Navegação</div>', unsafe_allow_html=True)
+    
+    for item in nav_items:
+        is_active = st.session_state.current_page == item["key"]
+        btn_label = f"✔  {item['label']}" if is_active else item["label"]
+        
+        if st.sidebar.button(btn_label, key=f"btn_{item['key']}", use_container_width=True):
+            st.session_state.current_page = item["key"]
+            st.rerun()
+    
+    # Inject JS to assign data-nav attributes for icon differentiation
+    # Using components.html to bypass Streamlit's script sanitization
+    components.html("""
+        <script>
+        function assignNavIcons() {
+            const doc = window.parent.document;
+            const sidebar = doc.querySelector('section[data-testid="stSidebar"]');
+            if (!sidebar) return;
+            const buttons = sidebar.querySelectorAll('.stButton button');
+            const mapping = {
+                'Resumo Geral': 'resumo',
+                'Evolu': 'peso',
+                'Ficha': 'ficha'
+            };
+            buttons.forEach(btn => {
+                const text = btn.textContent || '';
+                for (const [keyword, navKey] of Object.entries(mapping)) {
+                    if (text.includes(keyword)) {
+                        btn.setAttribute('data-nav', navKey);
+                        break;
+                    }
+                }
+            });
+        }
+        assignNavIcons();
+        setTimeout(assignNavIcons, 300);
+        setTimeout(assignNavIcons, 800);
+        setTimeout(assignNavIcons, 2000);
+        const observer = new MutationObserver(() => { assignNavIcons(); });
+        const target = window.parent.document.querySelector('section[data-testid="stSidebar"]');
+        if (target) observer.observe(target, { childList: true, subtree: true });
+        </script>
+    """, height=0)
+    
+    st.sidebar.markdown("---")
+    
+    st.sidebar.markdown("""
+        <div style="
+            background: rgba(6, 78, 59, 0.12);
+            border: 1px solid rgba(6, 78, 59, 0.25);
+            border-radius: 12px;
+            padding: 16px;
+            margin: 8px 0;
+        ">
+            <div style="font-size: 0.75rem; color: #94a3b8; text-transform: uppercase; letter-spacing: 1px; margin-bottom: 8px;">
+                Sistema
+            </div>
+            <div style="font-size: 0.9rem; font-weight: 600; color: #f8fafc;">
+                Esopo v1.0
+            </div>
+            <div style="font-size: 0.75rem; color: #64748b; margin-top: 4px;">
+                Gestão de Pecuária de Precisão
+            </div>
+        </div>
+    """, unsafe_allow_html=True)
+    
+    # Map session state to page key
+    page_map = {
+        "resumo": "🏠 Resumo Geral",
+        "peso": "📊 Evolução de Peso",
+        "ficha": "📋 Ficha de Animais",
+    }
+    page = page_map[st.session_state.current_page]
 
-    st.title(f"📊 Esopo - {page}")
+    # --- PAGE HEADER ---
+    page_icons = {
+        "🏠 Resumo Geral": ("dashboard", "icon-green", "Visão consolidada do rebanho"),
+        "📊 Evolução de Peso": ("monitoring", "icon-magenta", "Análise de performance zootécnica"),
+        "📋 Ficha de Animais": ("inventory_2", "icon-amber", "Movimentação e giro de estoque"),
+    }
+    icon_name, icon_class, subtitle = page_icons.get(page, ("info", "icon-green", ""))
+    clean_title = page.split(" ", 1)[1] if " " in page else page
+    
+    st.markdown(f"""
+        <div class="section-header" style="margin-top: 8px;">
+            <div class="icon-box {icon_class}">
+                <span class="mat-icon">{icon_name}</span>
+            </div>
+            <div>
+                <div class="section-title">{clean_title}</div>
+                <div class="section-subtitle">{subtitle}</div>
+            </div>
+        </div>
+    """, unsafe_allow_html=True)
+    
     
     try:
         conn = get_connection()
@@ -47,7 +872,17 @@ def main():
         df_all_farms = pd.read_sql(query_farms, conn)
         
         with st.container():
-            st.markdown("### 🚜 Seletor de Unidades (Global)")
+            st.markdown("""
+                <div class="section-header">
+                    <div class="icon-box icon-green">
+                        <span class="mat-icon">agriculture</span>
+                    </div>
+                    <div>
+                        <div class="section-title">Seletor de Unidades</div>
+                        <div class="section-subtitle">Filtro global por fazenda</div>
+                    </div>
+                </div>
+            """, unsafe_allow_html=True)
             selected_farm_names = st.multiselect(
                 "Fazendas Selecionadas:",
                 options=df_all_farms['descricao'].sort_values().tolist(),
@@ -78,27 +913,70 @@ def main():
             total_ua = df_metrics['total_ua'][0] if not df_metrics.empty else 0
             nascidos_ua = df_metrics['nascidos_ua'][0] if not df_metrics.empty else 0
             
-            st.markdown("#### 🔢 Quantitativo (Cabeças)")
+            st.markdown("""
+                <div class="section-header">
+                    <div class="icon-box icon-green">
+                        <span class="mat-icon">format_list_numbered</span>
+                    </div>
+                    <div>
+                        <div class="section-title">Quantitativo (Cabeças)</div>
+                        <div class="section-subtitle">Contagem do rebanho ativo</div>
+                    </div>
+                </div>
+            """, unsafe_allow_html=True)
             m1, m2, m3 = st.columns(3)
-            m1.metric("📦 Rebanho Ativo", f"{total_ativos:,}".replace(",", "."))
-            m2.metric("🐣 Nascidos", f"{total_nascidos:,}".replace(",", "."))
-            m3.metric("🤝 Comprados", f"{max(0, total_ativos - total_nascidos):,}".replace(",", "."))
+            m1.metric("Rebanho Ativo", f"{total_ativos:,}".replace(",", "."))
+            m2.metric("Nascidos", f"{total_nascidos:,}".replace(",", "."))
+            m3.metric("Comprados", f"{max(0, total_ativos - total_nascidos):,}".replace(",", "."))
 
-            st.markdown("#### ⚖️ Capacidade (Unidade Animal - UA)")
+            st.markdown("""
+                <div class="section-header">
+                    <div class="icon-box icon-magenta">
+                        <span class="mat-icon">scale</span>
+                    </div>
+                    <div>
+                        <div class="section-title">Capacidade (Unidade Animal — UA)</div>
+                        <div class="section-subtitle">Carga animal por categoria de origem</div>
+                    </div>
+                </div>
+            """, unsafe_allow_html=True)
             ua1, ua2, ua3 = st.columns(3)
-            ua1.metric("🐄 Total UA", format_br(total_ua))
-            ua2.metric("🍼 Nascidos UA", format_br(nascidos_ua))
-            ua3.metric("🏟️ Comprados UA", format_br(max(0.0, total_ua - nascidos_ua)))
+            ua1.metric("Total UA", format_br(total_ua))
+            ua2.metric("Nascidos UA", format_br(nascidos_ua))
+            ua3.metric("Comprados UA", format_br(max(0.0, total_ua - nascidos_ua)))
 
             st.divider()
             c_left, c_right = st.columns([1.2, 1])
             with c_left:
-                st.subheader("Unidades")
+                st.markdown("<div class='section-title' style='margin-bottom:12px;'>Distribuição por Unidade</div>", unsafe_allow_html=True)
                 df_pie = pd.read_sql(f"SELECT tf.descricao as fazenda, COUNT(c.cod_animal) as total FROM cad_fichario c JOIN Tab_fazenda tf ON c.cod_fazenda = tf.cod_fazenda WHERE {global_filter} GROUP BY tf.descricao", conn)
                 if not df_pie.empty:
-                    st.plotly_chart(px.pie(df_pie, values='total', names='fazenda', hole=0.4, template="plotly_dark"), use_container_width=True)
+                    fig_pie = px.pie(
+                        df_pie, 
+                        values='total', 
+                        names='fazenda', 
+                        hole=0.5,
+                        color_discrete_sequence=['#064e3b', '#be185d', '#64748b', '#d97706', '#059669', '#94a3b8']
+                    )
+                    fig_pie.update_layout(
+                        paper_bgcolor='rgba(0,0,0,0)',
+                        plot_bgcolor='rgba(0,0,0,0)',
+                        font=dict(family="Outfit", size=14),
+                        margin=dict(t=0, b=0, l=0, r=0)
+                    )
+                    st.plotly_chart(fig_pie, use_container_width=True)
             with c_right:
-                st.subheader("📊 Detalhamento Técnico das Categorias")
+                st.markdown("""
+                    <div class="section-header" style="padding-bottom: 8px; border-bottom: 1px solid rgba(190,24,93,0.12);">
+                        <div class="icon-box icon-magenta">
+                            <span class="mat-icon">analytics</span>
+                        </div>
+                        <div>
+                            <div class="section-title">Detalhamento Técnico</div>
+                            <div class="section-subtitle">Indicadores por categoria</div>
+                        </div>
+                    </div>
+                """, unsafe_allow_html=True)
                 query_grid = f"""
                     WITH UltimaPesagem AS ( 
                         SELECT cod_animal, peso, data, GPM, GPD,
@@ -143,7 +1021,17 @@ def main():
                 periodo_meses = st.slider("Período de Análise (Meses):", 0, 60, 12, key="peso_slider")
 
             if sub_page == "📤 Vendas":
-                st.subheader("🔎 Performance de Animais Vendidos")
+                st.markdown("""
+                    <div class="section-header">
+                        <div class="icon-box icon-magenta">
+                            <span class="mat-icon">point_of_sale</span>
+                        </div>
+                        <div>
+                            <div class="section-title">Performance de Animais Vendidos</div>
+                            <div class="section-subtitle">Análise de margem e GMD por lote</div>
+                        </div>
+                    </div>
+                """, unsafe_allow_html=True)
                 
                 # Fetch Buyers
                 query_b = f"SELECT DISTINCT tc.cod_criador, tc.descricao FROM cad_venda cv JOIN Tab_criador tc ON cv.cod_criador = tc.cod_criador JOIN cad_fichario cf ON cv.cod_animal = cf.cod_animal WHERE cf.cod_fazenda IN ({farm_ids_str}) AND cv.data >= DATEADD(month, -{periodo_meses}, GETDATE())"
@@ -190,13 +1078,39 @@ def main():
                         df['gt'] = df['pv'] - df['pi']
                         df['gmd'] = df['gt'] / df['td'].replace(0, 1)
                         
-                        st.plotly_chart(px.sunburst(df, path=['comp', 'og'], values='pv', color='gmd', 
-                                                   color_continuous_scale='RdYlGn', template="plotly_dark",
-                                                   title="Hierarquia de Grupos: Comprador > Origem"), use_container_width=True)
+                        custom_scale = [
+                            [0.0, "#be185d"], # Magenta for low performance
+                            [0.5, "#d97706"], # Amber for average
+                            [1.0, "#064e3b"]  # Dark Green for high performance
+                        ]
+                        
+                        fig_sun = px.sunburst(
+                            df, 
+                            path=['comp', 'og'], 
+                            values='pv', 
+                            color='gmd', 
+                            color_continuous_scale=custom_scale,
+                            title="Hierarquia: Comprador > Origem"
+                        )
+                        fig_sun.update_layout(
+                            paper_bgcolor='rgba(0,0,0,0)',
+                            font=dict(family="Outfit"),
+                            title_font=dict(size=20, color="#064e3b")
+                        )
+                        st.plotly_chart(fig_sun, use_container_width=True)
                         
                         st.markdown("---")
-                        st.subheader("🌲 Árvore de Decomposição (Estilo PowerBI)")
-                        st.info("💡 Clique nos blocos para detalhar os níveis (Venda -> Cliente -> Compra -> Fornecedor)")
+                        st.markdown("""
+                            <div class="section-header">
+                                <div class="icon-box icon-amber">
+                                    <span class="mat-icon">account_tree</span>
+                                </div>
+                                <div>
+                                    <div class="section-title">Árvore de Decomposição</div>
+                                    <div class="section-subtitle">Clique nos blocos para detalhar: Venda → Cliente → Compra → Fornecedor</div>
+                                </div>
+                            </div>
+                        """, unsafe_allow_html=True)
                         
                         df_tree = df.copy()
                         df_tree['Venda'] = df_tree['dtv'].dt.strftime('%d/%m/%Y')
@@ -210,20 +1124,33 @@ def main():
                             path=[px.Constant("Total Vendas"), 'Cliente', 'Venda', 'Fornecedor', 'Compra'],
                             values='Qtd',
                             color='gmd',
-                            color_continuous_scale='RdYlGn',
-                            template="plotly_dark",
-                            title="Decomposição da Cadeia de Venda (Cor = GMD)"
+                            color_continuous_scale=custom_scale,
+                            title="Decomposição da Cadeia (Cor = GMD)"
                         )
                         fig_tree.update_traces(textinfo="label+value")
+                        fig_tree.update_layout(
+                            paper_bgcolor='rgba(0,0,0,0)',
+                            font=dict(family="Outfit")
+                        )
                         st.plotly_chart(fig_tree, use_container_width=True)
                         
-                        st.subheader("📋 Detalhamento da Performance")
+                        st.markdown("<div class='section-title' style='margin: 16px 0 12px;'>Detalhamento da Performance</div>", unsafe_allow_html=True)
                         res = df.groupby(['comp', 'og']).agg({'id_animal': 'count', 'pv': 'mean', 'td': 'mean', 'gt': 'mean', 'gmd': 'mean'}).reset_index()
                         res.columns = ['Comprador', 'Origem (Lote/Mês)', 'Qtd', 'Peso Venda (Avg)', 'Permanência (Dias)', 'Ganho Total', 'GMD (Kg/dia)']
                         st.dataframe(res.style.format({'Peso Venda (Avg)': '{:.1f}', 'Permanência (Dias)': '{:.0f}', 'Ganho Total': '{:.1f}', 'GMD (Kg/dia)': '{:.3f}'}), use_container_width=True, hide_index=True)
 
             elif sub_page == "📥 Compras":
-                st.subheader("📈 Performance de Lotes Comprados")
+                st.markdown("""
+                    <div class="section-header">
+                        <div class="icon-box icon-green">
+                            <span class="mat-icon">shopping_cart</span>
+                        </div>
+                        <div>
+                            <div class="section-title">Performance de Lotes Comprados</div>
+                            <div class="section-subtitle">Evolução de ganho por fornecedor</div>
+                        </div>
+                    </div>
+                """, unsafe_allow_html=True)
                 
                 query_s = f"SELECT DISTINCT tc.cod_criador, tc.descricao FROM cad_compra cc JOIN Tab_criador tc ON cc.cod_criador = tc.cod_criador JOIN cad_fichario cf ON cc.cod_animal = cf.cod_animal WHERE cf.cod_fazenda IN ({farm_ids_str}) AND cc.data >= DATEADD(month, -{periodo_meses}, GETDATE())"
                 df_s = pd.read_sql(query_s, conn)
@@ -256,14 +1183,35 @@ def main():
                         df_c['gt'] = (df_c['pf'] - df_c['pi']).fillna(0)
                         df_c['gmd'] = df_c['gt'] / df_c['td'].replace(0, 1)
                         
-                        st.plotly_chart(px.bar(df_c.groupby('fornecedor')['gmd'].mean().reset_index(), 
-                                             x='fornecedor', y='gmd', color='gmd', 
-                                             title="GMD Médio por Fornecedor (kg/dia)", template="plotly_dark"), use_container_width=True)
+                        fig_bar = px.bar(
+                            df_c.groupby('fornecedor')['gmd'].mean().reset_index(), 
+                            x='fornecedor', 
+                            y='gmd', 
+                            color='gmd', 
+                            color_continuous_scale=custom_scale,
+                            title="GMD Médio por Fornecedor (kg/dia)"
+                        )
+                        fig_bar.update_layout(
+                            paper_bgcolor='rgba(0,0,0,0)',
+                            plot_bgcolor='rgba(0,0,0,0)',
+                            font=dict(family="Outfit")
+                        )
+                        st.plotly_chart(fig_bar, use_container_width=True)
                         
                         st.dataframe(df_c.groupby(['fornecedor', 'dt_compra']).agg({'id_animal':'count', 'pi':'mean', 'pf':'mean', 'gt':'mean', 'gmd':'mean'}).reset_index(), use_container_width=True)
 
             elif sub_page == "🐣 Nascimentos":
-                st.subheader("🍼 Evolução de Animais Nascidos")
+                st.markdown("""
+                    <div class="section-header">
+                        <div class="icon-box icon-green">
+                            <span class="mat-icon">child_care</span>
+                        </div>
+                        <div>
+                            <div class="section-title">Evolução de Animais Nascidos</div>
+                            <div class="section-subtitle">GMD e eficiência de cria</div>
+                        </div>
+                    </div>
+                """, unsafe_allow_html=True)
                 sql_n = f"""
                     WITH LW AS (
                         SELECT cod_animal, peso, ROW_NUMBER() OVER (PARTITION BY cod_animal ORDER BY data DESC) as rn
@@ -281,13 +1229,34 @@ def main():
                     df_n['mes_nasc'] = df_n['dt_nascimento'].dt.strftime('%m/%Y')
                     df_n['gmd'] = (df_n['pf'] - 40.0) / df_n['td'].replace(0, 1)
                     
-                    st.plotly_chart(px.line(df_n.groupby('mes_nasc')['gmd'].mean().reset_index(), 
-                                           x='mes_nasc', y='gmd', markers=True, 
-                                           title="Eficiência de Crescimento (GMD) por Mês de Nascimento", template="plotly_dark"), use_container_width=True)
+                    fig_line = px.line(
+                        df_n.groupby('mes_nasc')['gmd'].mean().reset_index(), 
+                        x='mes_nasc', 
+                        y='gmd', 
+                        markers=True, 
+                        title="Eficiência (GMD) por Ciclo"
+                    )
+                    fig_line.update_traces(line_color='#064e3b', marker=dict(size=10, color='#be185d'))
+                    fig_line.update_layout(
+                        paper_bgcolor='rgba(0,0,0,0)',
+                        plot_bgcolor='rgba(0,0,0,0)',
+                        font=dict(family="Outfit")
+                    )
+                    st.plotly_chart(fig_line, use_container_width=True)
                     st.dataframe(df_n.groupby('mes_nasc').agg({'id_animal':'count', 'pf':'mean', 'gmd':'mean'}).reset_index(), use_container_width=True)
 
         elif page == "📋 Ficha de Animais":
-            st.subheader("📉 Giro de Estoque Mensal")
+            st.markdown("""
+                <div class="section-header">
+                    <div class="icon-box icon-amber">
+                        <span class="mat-icon">swap_vert</span>
+                    </div>
+                    <div>
+                        <div class="section-title">Giro de Estoque Mensal</div>
+                        <div class="section-subtitle">Movimentação de entradas e saídas</div>
+                    </div>
+                </div>
+            """, unsafe_allow_html=True)
             c1, c2 = st.columns([2, 1])
             with c1: periodo = st.slider("Exibir (Meses):", 0, 36, 12)
             with c2: segregate = st.toggle("Detalhamento Individual", value=False)
@@ -328,20 +1297,40 @@ def main():
             df_p = sum_df.tail(periodo)
 
             fig = go.Figure()
-            fig.add_trace(go.Bar(x=df_p.index, y=df_p['REBANHO'], name='Cabeças', marker_color='rgba(100,149,237,0.3)', yaxis='y2'))
-            fig.add_trace(go.Bar(x=df_p.index, y=df_p['UA'], name='UA', marker_color='rgba(155,89,182,0.5)', yaxis='y2'))
+            fig.add_trace(go.Bar(
+                x=df_p.index, 
+                y=df_p['REBANHO'], 
+                name='Cabeças', 
+                marker_color='rgba(6, 78, 59, 0.4)', # Green transparent
+                yaxis='y2'
+            ))
+            fig.add_trace(go.Bar(
+                x=df_p.index, 
+                y=df_p['UA'], 
+                name='UA', 
+                marker_color='rgba(190, 24, 93, 0.25)', # Magenta transparent
+                yaxis='y2'
+            ))
             
             if not segregate:
-                fig.add_trace(go.Scatter(x=df_p.index, y=df_p['E_Q'], name='Entradas (Qtd)', line=dict(color='#2ecc71', width=3)))
-                fig.add_trace(go.Scatter(x=df_p.index, y=df_p['S_Q'], name='Saídas (Qtd)', line=dict(color='#e74c3c', width=3)))
+                fig.add_trace(go.Scatter(x=df_p.index, y=df_p['E_Q'], name='Entradas', line=dict(color='#064e3b', width=3)))
+                fig.add_trace(go.Scatter(x=df_p.index, y=df_p['S_Q'], name='Saídas', line=dict(color='#be185d', width=3)))
             else:
                 det = pivot_qtd.tail(periodo)
-                fig.add_trace(go.Scatter(x=det.index, y=det['NASCIMENTO'], name='🐣 Nascimentos', line=dict(color='#00d1b2')))
-                fig.add_trace(go.Scatter(x=det.index, y=det['COMPRA'], name='🤝 Compras', line=dict(color='#3273dc')))
-                fig.add_trace(go.Scatter(x=det.index, y=det['VENDA'], name='💰 Vendas', line=dict(color='#ff3860')))
-                fig.add_trace(go.Scatter(x=det.index, y=det['MORTE'], name='⚠️ Mortes', line=dict(color='#ffdd57'), yaxis='y3'))
+                fig.add_trace(go.Scatter(x=det.index, y=det['NASCIMENTO'], name='🐣 Nascimentos', line=dict(color='#10b981', width=2)))
+                fig.add_trace(go.Scatter(x=det.index, y=det['COMPRA'], name='🤝 Compras', line=dict(color='#3b82f6', width=2)))
+                fig.add_trace(go.Scatter(x=det.index, y=det['VENDA'], name='💰 Vendas', line=dict(color='#be185d', width=2)))
+                fig.add_trace(go.Scatter(x=det.index, y=det['MORTE'], name='⚠️ Mortes', line=dict(color='#94a3b8', width=2), yaxis='y3'))
 
-            fig.update_layout(template="plotly_dark", barmode='group', yaxis2=dict(overlaying='y', side='right', showgrid=False), yaxis3=dict(overlaying='y', side='left', position=0.05, showgrid=False), margin=dict(l=80) if segregate else None)
+            fig.update_layout(
+                paper_bgcolor='rgba(0,0,0,0)',
+                plot_bgcolor='rgba(0,0,0,0)',
+                barmode='group', 
+                yaxis2=dict(overlaying='y', side='right', showgrid=False), 
+                yaxis3=dict(overlaying='y', side='left', position=0.05, showgrid=False), 
+                font=dict(family="Outfit"),
+                margin=dict(l=80) if segregate else None
+            )
             st.plotly_chart(fig, use_container_width=True)
 
     except Exception as e:
