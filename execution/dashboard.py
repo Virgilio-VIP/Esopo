@@ -1661,6 +1661,82 @@ def main():
                 margin=dict(l=80) if segregate else None
             )
             st.plotly_chart(fig, use_container_width=True)
+            
+            # --- New: Resumo por Lote Grid ---
+            st.markdown("---")
+            st.markdown("""
+                <div class="section-header">
+                    <div class="icon-box icon-green">
+                        <span class="mat-icon">grid_view</span>
+                    </div>
+                    <div>
+                        <div class="section-title">Resumo por Lote</div>
+                        <div class="section-subtitle">Peso projetado, GMD e datas de pesagem por lote ativo</div>
+                    </div>
+                </div>
+            """, unsafe_allow_html=True)
+            
+            sql_lote = f"""
+                WITH UltPes AS (
+                    SELECT cod_animal, peso, data, GPD,
+                           ROW_NUMBER() OVER (PARTITION BY cod_animal ORDER BY data DESC) as rn
+                    FROM cad_pesagem_corte
+                ),
+                AntiPen AS (
+                    SELECT cod_animal, data,
+                           ROW_NUMBER() OVER (PARTITION BY cod_animal ORDER BY data DESC) as rn
+                    FROM cad_pesagem_corte
+                )
+                SELECT 
+                    tf.descricao as Fazenda, 
+                    ISNULL(tl.descricao, '(Sem Lote)') as Lote,
+                    COUNT(c.cod_animal) as Qtd,
+                    AVG(up.peso + (DATEDIFF(day, up.data, GETDATE()) * ISNULL(up.GPD, 0))) as PesoProjetado,
+                    AVG(up.GPD) as GMD_Medio,
+                    MAX(up.data) as Ult_Pesagem,
+                    DATEDIFF(day, MAX(up.data), GETDATE()) as Dias_Ult,
+                    MAX(ap.data) as Ante_Pen
+                FROM cad_fichario c
+                JOIN Tab_fazenda tf ON c.cod_fazenda = tf.cod_fazenda
+                LEFT JOIN Tab_lote tl ON c.cod_lote = tl.cod_lote
+                LEFT JOIN UltPes up ON c.cod_animal = up.cod_animal AND up.rn = 1
+                LEFT JOIN AntiPen ap ON c.cod_animal = ap.cod_animal AND ap.rn = 2
+                WHERE c.cod_fazenda IN ({farm_ids_str})
+                AND c.cod_categoria NOT IN (
+                    SELECT cod_categoria FROM Tab_categoria WHERE morto = 'S' OR vendido = 'S'
+                )
+                GROUP BY tf.descricao, tl.descricao
+                ORDER BY tf.descricao, Qtd DESC
+            """
+            df_lote = pd.read_sql(sql_lote, conn)
+            
+            if not df_lote.empty:
+                # Format last weighing date with days in parentheses
+                df_lote['Última Pesagem'] = df_lote.apply(
+                    lambda r: f"{r['Ult_Pesagem'].strftime('%d/%m/%Y')} ({int(r['Dias_Ult'])}d)" 
+                    if pd.notna(r['Ult_Pesagem']) else '—', axis=1
+                )
+                # Format second-to-last weighing date
+                df_lote['Penúltima Pesagem'] = df_lote['Ante_Pen'].apply(
+                    lambda x: x.strftime('%d/%m/%Y') if pd.notna(x) else '—'
+                )
+                
+                # Build display dataframe
+                display_lote = df_lote[['Fazenda', 'Lote', 'Qtd']].copy()
+                display_lote['Peso Atual (kg)'] = df_lote['PesoProjetado'].round(1)
+                display_lote['GMD (kg/dia)'] = df_lote['GMD_Medio'].round(3)
+                display_lote['Última Pesagem'] = df_lote['Última Pesagem']
+                display_lote['Penúltima Pesagem'] = df_lote['Penúltima Pesagem']
+                display_lote = display_lote.rename(columns={'Qtd': 'Quantidade'})
+                
+                display_lote = format_grid_df(display_lote, {
+                    'Peso Atual (kg)': '{:.1f}',
+                    'GMD (kg/dia)': '{:.3f}'
+                })
+                
+                st.dataframe(display_lote, use_container_width=True, hide_index=True)
+            else:
+                st.info("Nenhum dado de lote encontrado para as fazendas selecionadas.")
 
     except Exception as e:
         st.error(f"❌ Erro: {e}")
