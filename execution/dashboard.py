@@ -712,6 +712,12 @@ st.markdown("""
     section[data-testid="stSidebar"] button[data-nav="ficha"]::before {
         content: 'inventory_2' !important;
     }
+    section[data-testid="stSidebar"] button[data-nav="planejamento"]::before {
+        content: 'calculate' !important;
+    }
+    section[data-testid="stSidebar"] button[data-nav="calendario"]::before {
+        content: 'calendar_month' !important;
+    }
     /* Fallback: default icon if data-nav not yet set */
     section[data-testid="stSidebar"] .stButton > button:not([data-nav])::before {
         content: 'radio_button_unchecked';
@@ -738,6 +744,9 @@ load_dotenv(dotenv_path=env_path)
 
 def get_connection():
     return pyodbc.connect(f"DRIVER={os.getenv('DB_DRIVER')};SERVER={os.getenv('DB_SERVER')};DATABASE={os.getenv('DB_DATABASE')};UID={os.getenv('DB_USERNAME')};PWD={os.getenv('DB_PASSWORD')}")
+
+def get_vipper_connection():
+    return pyodbc.connect(f"DRIVER={os.getenv('DB_DRIVER')};SERVER={os.getenv('DB_SERVER')};DATABASE=Vipper_KNW;UID={os.getenv('DB_USERNAME')};PWD={os.getenv('DB_PASSWORD')}")
 
 def format_br(val):
     if val is None: return "0,00"
@@ -772,6 +781,8 @@ def main():
         {"key": "resumo",    "icon": "dashboard",   "label": "Resumo Geral",    "desc": "Visão consolidada"},
         {"key": "peso",      "icon": "monitoring",   "label": "Evolução de Peso", "desc": "Performance zootécnica"},
         {"key": "ficha",     "icon": "inventory_2",  "label": "Ficha de Animais", "desc": "Giro de estoque"},
+        {"key": "planejamento", "icon": "calculate", "label": "Planejamento",    "desc": "Simulação financeira"},
+        {"key": "calendario",   "icon": "calendar_month", "label": "Calendário",  "desc": "Atividades e eventos"},
     ]
     
     # --- SIDEBAR — Premium Brand ---
@@ -792,7 +803,7 @@ def main():
                 {logo_html}
             </div>
             <div class="esopo-brand-title">ESOPO</div>
-            <div class="esopo-brand-subtitle">Pecuária de Precisão</div>
+            <div class="esopo-brand-subtitle">Converse com a sua Fazenda</div>
         </div>
     """, unsafe_allow_html=True)
     
@@ -821,7 +832,9 @@ def main():
             const mapping = {
                 'Resumo Geral': 'resumo',
                 'Evolu': 'peso',
-                'Ficha': 'ficha'
+                'Ficha': 'ficha',
+                'Planejamento': 'planejamento',
+                'Calend': 'calendario'
             };
             buttons.forEach(btn => {
                 const text = btn.textContent || '';
@@ -877,6 +890,8 @@ def main():
         "resumo": "🏠 Resumo Geral",
         "peso": "📊 Evolução de Peso",
         "ficha": "📋 Ficha de Animais",
+        "planejamento": "📐 Planejamento",
+        "calendario": "📅 Calendário",
     }
     page = page_map[st.session_state.current_page]
 
@@ -885,6 +900,8 @@ def main():
         "🏠 Resumo Geral": ("dashboard", "icon-green", "Visão consolidada do rebanho"),
         "📊 Evolução de Peso": ("monitoring", "icon-magenta", "Análise de performance zootécnica"),
         "📋 Ficha de Animais": ("inventory_2", "icon-amber", "Movimentação e giro de estoque"),
+        "📐 Planejamento": ("calculate", "icon-green", "Simulação financeira de evolução do rebanho"),
+        "📅 Calendário": ("calendar_month", "icon-green", "Calendário de atividades e eventos do rebanho"),
     }
     icon_name, icon_class, subtitle = page_icons.get(page, ("info", "icon-green", ""))
     clean_title = page.split(" ", 1)[1] if " " in page else page
@@ -1937,10 +1954,740 @@ def main():
             else:
                 st.info("Nenhum dado de lote encontrado para as fazendas selecionadas.")
 
+        # =====================================================
+        # PLANEJAMENTO PAGE
+        # =====================================================
+        elif page == "📐 Planejamento":
+            pass  # Handled separately below
+
+        # =====================================================
+        # CALENDÁRIO PAGE
+        # =====================================================
+        elif page == "📅 Calendário":
+            import calendar
+            from datetime import datetime, timedelta
+
+            st.markdown("---")
+
+            # --- Month/Year selector ---
+            cal_col1, cal_col2, cal_col3 = st.columns([1, 1, 2])
+            today = datetime.now()
+            with cal_col1:
+                cal_month = st.selectbox(
+                    "Mês:",
+                    list(range(1, 13)),
+                    index=today.month - 1,
+                    format_func=lambda m: ['Janeiro','Fevereiro','Março','Abril','Maio','Junho','Julho','Agosto','Setembro','Outubro','Novembro','Dezembro'][m-1],
+                    key="cal_month"
+                )
+            with cal_col2:
+                cal_year = st.selectbox(
+                    "Ano:",
+                    list(range(today.year - 5, today.year + 2)),
+                    index=5,
+                    key="cal_year"
+                )
+
+            first_day = datetime(cal_year, cal_month, 1)
+            if cal_month == 12:
+                last_day = datetime(cal_year + 1, 1, 1) - timedelta(days=1)
+            else:
+                last_day = datetime(cal_year, cal_month + 1, 1) - timedelta(days=1)
+
+            date_start = first_day.strftime('%Y-%m-%d')
+            date_end = last_day.strftime('%Y-%m-%d')
+
+            # --- Query all activities for the month ---
+            sql_activities = f"""
+                -- Pesagens
+                SELECT cp.data as data_evento, 'Pesagem' as tipo, 
+                       tf.descricao as fazenda, COUNT(*) as qtd,
+                       CAST(AVG(cp.peso) AS DECIMAL(10,1)) as valor_medio
+                FROM cad_pesagem_corte cp
+                JOIN cad_fichario c ON cp.cod_animal = c.cod_animal
+                JOIN Tab_fazenda tf ON c.cod_fazenda = tf.cod_fazenda
+                WHERE c.cod_fazenda IN ({farm_ids_str})
+                AND cp.data BETWEEN '{date_start}' AND '{date_end}'
+                GROUP BY cp.data, tf.descricao
+
+                UNION ALL
+
+                -- Compras
+                SELECT cc.data as data_evento, 'Compra' as tipo,
+                       tf.descricao as fazenda, COUNT(*) as qtd,
+                       CAST(AVG(cc.peso) AS DECIMAL(10,1)) as valor_medio
+                FROM cad_compra cc
+                JOIN cad_fichario c ON cc.cod_animal = c.cod_animal
+                JOIN Tab_fazenda tf ON c.cod_fazenda = tf.cod_fazenda
+                WHERE c.cod_fazenda IN ({farm_ids_str})
+                AND cc.data BETWEEN '{date_start}' AND '{date_end}'
+                GROUP BY cc.data, tf.descricao
+
+                UNION ALL
+
+                -- Vendas
+                SELECT cv.data as data_evento, 'Venda' as tipo,
+                       tf.descricao as fazenda, COUNT(*) as qtd,
+                       CAST(AVG(ISNULL(pc.peso, 0)) AS DECIMAL(10,1)) as valor_medio
+                FROM cad_venda cv
+                JOIN cad_fichario c ON cv.cod_animal = c.cod_animal
+                JOIN Tab_fazenda tf ON c.cod_fazenda = tf.cod_fazenda
+                LEFT JOIN cad_pesagem_corte pc ON cv.cod_animal = pc.cod_animal AND cv.data = pc.data
+                WHERE c.cod_fazenda IN ({farm_ids_str})
+                AND cv.data BETWEEN '{date_start}' AND '{date_end}'
+                GROUP BY cv.data, tf.descricao
+
+                UNION ALL
+
+                -- Mortes
+                SELECT cm.data as data_evento, 'Morte' as tipo,
+                       tf.descricao as fazenda, COUNT(*) as qtd,
+                       NULL as valor_medio
+                FROM cad_morte cm
+                JOIN cad_fichario c ON cm.cod_animal = c.cod_animal
+                JOIN Tab_fazenda tf ON c.cod_fazenda = tf.cod_fazenda
+                WHERE c.cod_fazenda IN ({farm_ids_str})
+                AND cm.data BETWEEN '{date_start}' AND '{date_end}'
+                GROUP BY cm.data, tf.descricao
+
+                UNION ALL
+
+                -- Nascimentos
+                SELECT c.dt_nascimento as data_evento, 'Nascimento' as tipo,
+                       tf.descricao as fazenda, COUNT(*) as qtd,
+                       NULL as valor_medio
+                FROM cad_fichario c
+                JOIN Tab_fazenda tf ON c.cod_fazenda = tf.cod_fazenda
+                WHERE c.cod_fazenda IN ({farm_ids_str})
+                AND c.dt_nascimento BETWEEN '{date_start}' AND '{date_end}'
+                AND c.origem = 'N'
+                GROUP BY c.dt_nascimento, tf.descricao
+
+                UNION ALL
+
+                -- Movimentações
+                SELECT cm.data as data_evento, 
+                       'Mov. ' + cm.tipo as tipo,
+                       tf.descricao as fazenda, COUNT(*) as qtd,
+                       NULL as valor_medio
+                FROM cad_movimento cm
+                JOIN cad_fichario c ON cm.cod_animal = c.cod_animal
+                JOIN Tab_fazenda tf ON cm.cod_fazenda = tf.cod_fazenda
+                WHERE cm.cod_fazenda IN ({farm_ids_str})
+                AND cm.data BETWEEN '{date_start}' AND '{date_end}'
+                GROUP BY cm.data, cm.tipo, tf.descricao
+
+                ORDER BY data_evento
+            """
+            df_cal = pd.read_sql(sql_activities, conn)
+
+            # --- Activity type colors ---
+            activity_colors = {
+                'Pesagem': '#059669',
+                'Compra': '#3b82f6',
+                'Venda': '#be185d',
+                'Morte': '#64748b',
+                'Nascimento': '#d97706',
+            }
+            # Movimentações get a teal color
+            mov_color = '#0891b2'
+
+            def get_color(tipo):
+                if tipo.startswith('Mov.'):
+                    return mov_color
+                return activity_colors.get(tipo, '#94a3b8')
+
+            def get_icon(tipo):
+                icons = {
+                    'Pesagem': '⚖️',
+                    'Compra': '🤝',
+                    'Venda': '💰',
+                    'Morte': '⚠️',
+                    'Nascimento': '🐣',
+                }
+                if tipo.startswith('Mov.'):
+                    return '🔄'
+                return icons.get(tipo, '📌')
+
+            # --- KPI Summary Cards ---
+            month_name = ['Janeiro','Fevereiro','Março','Abril','Maio','Junho','Julho','Agosto','Setembro','Outubro','Novembro','Dezembro'][cal_month - 1]
+
+            if not df_cal.empty:
+                total_events = int(df_cal['qtd'].sum())
+                unique_days = df_cal['data_evento'].nunique()
+                activity_types = df_cal['tipo'].nunique()
+                farms_active = df_cal['fazenda'].nunique()
+            else:
+                total_events = 0
+                unique_days = 0
+                activity_types = 0
+                farms_active = 0
+
+            st.markdown("""
+                <div class="section-header">
+                    <div class="icon-box icon-green">
+                        <span class="mat-icon">insights</span>
+                    </div>
+                    <div>
+                        <div class="section-title">Resumo do Mês</div>
+                        <div class="section-subtitle">Indicadores de atividade para """ + month_name + f""" {cal_year}</div>
+                    </div>
+                </div>
+            """, unsafe_allow_html=True)
+
+            kc1, kc2, kc3, kc4 = st.columns(4)
+            kc1.metric("📋 Total de Eventos", f"{total_events}")
+            kc2.metric("📅 Dias com Atividade", f"{unique_days}")
+            kc3.metric("🏷️ Tipos de Atividade", f"{activity_types}")
+            kc4.metric("🚜 Fazendas Ativas", f"{farms_active}")
+
+            st.markdown("---")
+
+            # --- CALENDAR GRID ---
+            st.markdown("""
+                <div class="section-header">
+                    <div class="icon-box icon-magenta">
+                        <span class="mat-icon">calendar_month</span>
+                    </div>
+                    <div>
+                        <div class="section-title">Calendário de Atividades</div>
+                        <div class="section-subtitle">Visualização mensal — clique em um dia para detalhes</div>
+                    </div>
+                </div>
+            """, unsafe_allow_html=True)
+
+            # Build calendar data: group activities by day
+            cal_by_day = {}
+            if not df_cal.empty:
+                for _, row in df_cal.iterrows():
+                    day = row['data_evento'].day if hasattr(row['data_evento'], 'day') else pd.to_datetime(row['data_evento']).day
+                    if day not in cal_by_day:
+                        cal_by_day[day] = []
+                    cal_by_day[day].append(row)
+
+            # Build HTML calendar
+            cal_obj = calendar.Calendar(firstweekday=6)  # Domingo = primeiro dia
+            weeks = cal_obj.monthdayscalendar(cal_year, cal_month)
+
+            weekday_names = ['Dom', 'Seg', 'Ter', 'Qua', 'Qui', 'Sex', 'Sáb']
+
+            cal_html = '<div style="overflow-x: auto;">'
+            cal_html += '<table style="width:100%; border-collapse: separate; border-spacing: 4px; table-layout: fixed;">'
+
+            # Header
+            cal_html += '<thead><tr>'
+            for wd in weekday_names:
+                cal_html += f'<th style="text-align:center; padding:8px; font-size:0.8rem; color:#64748b; font-weight:600; letter-spacing:0.5px;">{wd}</th>'
+            cal_html += '</tr></thead>'
+
+            # Body
+            cal_html += '<tbody>'
+            for week in weeks:
+                cal_html += '<tr>'
+                for day in week:
+                    if day == 0:
+                        cal_html += '<td style="padding:4px;"></td>'
+                    else:
+                        activities = cal_by_day.get(day, [])
+                        is_today = (day == today.day and cal_month == today.month and cal_year == today.year)
+                        has_events = len(activities) > 0
+
+                        # Cell styling
+                        bg = 'rgba(255,255,255,0.85)'
+                        border = '1px solid #e2e8f0'
+                        if is_today:
+                            border = '2px solid #064e3b'
+                            bg = 'rgba(6, 78, 59, 0.05)'
+                        if has_events:
+                            bg = 'rgba(6, 78, 59, 0.04)'
+
+                        cal_html += f'<td style="vertical-align:top; padding:6px 4px; min-height:80px; height:80px; background:{bg}; border:{border}; border-radius:8px;">'
+
+                        # Day number
+                        day_color = '#064e3b' if is_today else '#1e293b'
+                        day_weight = '700' if is_today else '500'
+                        cal_html += f'<div style="font-size:0.85rem; font-weight:{day_weight}; color:{day_color}; margin-bottom:3px;">{day}</div>'
+
+                        # Activity pills
+                        if has_events:
+                            # Group by type and sum
+                            type_totals = {}
+                            for act in activities:
+                                t = act['tipo']
+                                q = int(act['qtd'])
+                                type_totals[t] = type_totals.get(t, 0) + q
+
+                            for tipo, qtd in type_totals.items():
+                                color = get_color(tipo)
+                                icon = get_icon(tipo)
+                                short_label = tipo.replace('Mov. ', '').replace('Nascimento', 'Nasc.')[:8]
+                                cal_html += f'<div style="font-size:0.6rem; background:{color}15; color:{color}; border-left:2px solid {color}; padding:1px 4px; margin-bottom:2px; border-radius:3px; white-space:nowrap; overflow:hidden; text-overflow:ellipsis;">{icon} {qtd} {short_label}</div>'
+
+                        cal_html += '</td>'
+                cal_html += '</tr>'
+            cal_html += '</tbody></table></div>'
+
+            st.markdown(cal_html, unsafe_allow_html=True)
+
+            # --- Legend ---
+            legend_items = [
+                ('⚖️ Pesagem', '#059669'),
+                ('🤝 Compra', '#3b82f6'),
+                ('💰 Venda', '#be185d'),
+                ('⚠️ Morte', '#64748b'),
+                ('🐣 Nascimento', '#d97706'),
+                ('🔄 Movimentação', '#0891b2'),
+            ]
+            legend_html = '<div style="display:flex; gap:16px; flex-wrap:wrap; margin:12px 0 20px 0;">'
+            for label, color in legend_items:
+                legend_html += f'<div style="display:flex; align-items:center; gap:4px; font-size:0.78rem; color:#475569;"><div style="width:12px; height:12px; border-radius:3px; background:{color};"></div>{label}</div>'
+            legend_html += '</div>'
+            st.markdown(legend_html, unsafe_allow_html=True)
+
+            # --- Day Detail Selector ---
+            st.markdown("---")
+            st.markdown("""
+                <div class="section-header">
+                    <div class="icon-box icon-amber">
+                        <span class="mat-icon">event_note</span>
+                    </div>
+                    <div>
+                        <div class="section-title">Detalhes do Dia</div>
+                        <div class="section-subtitle">Selecione um dia para ver as atividades detalhadas</div>
+                    </div>
+                </div>
+            """, unsafe_allow_html=True)
+
+            days_with_events = sorted(cal_by_day.keys()) if cal_by_day else []
+            if days_with_events:
+                selected_day = st.selectbox(
+                    "Dia:",
+                    days_with_events,
+                    format_func=lambda d: f"{d:02d}/{cal_month:02d}/{cal_year} — {sum(int(a['qtd']) for a in cal_by_day[d])} evento(s)",
+                    key="cal_selected_day"
+                )
+
+                if selected_day:
+                    day_activities = cal_by_day[selected_day]
+                    detail_rows = []
+                    for act in day_activities:
+                        detail_rows.append({
+                            'Tipo': f"{get_icon(act['tipo'])} {act['tipo']}",
+                            'Fazenda': act['fazenda'],
+                            'Quantidade': int(act['qtd']),
+                            'Valor Médio (kg)': f"{act['valor_medio']:.1f}" if pd.notna(act['valor_medio']) and act['valor_medio'] else '—'
+                        })
+
+                    df_detail = pd.DataFrame(detail_rows)
+                    st.dataframe(df_detail, use_container_width=True, hide_index=True)
+
+                    # Summary cards for the selected day
+                    total_day = sum(int(a['qtd']) for a in day_activities)
+                    farms_day = len(set(a['fazenda'] for a in day_activities))
+                    types_day = len(set(a['tipo'] for a in day_activities))
+
+                    dc1, dc2, dc3 = st.columns(3)
+                    dc1.metric("Total Eventos no Dia", f"{total_day}")
+                    dc2.metric("Fazendas Envolvidas", f"{farms_day}")
+                    dc3.metric("Tipos de Atividade", f"{types_day}")
+            else:
+                st.info(f"📅 Nenhuma atividade registrada em {month_name} de {cal_year} para as fazendas selecionadas.")
+
+            # --- Monthly Summary by Activity Type ---
+            st.markdown("---")
+            st.markdown("""
+                <div class="section-header">
+                    <div class="icon-box icon-green">
+                        <span class="mat-icon">bar_chart</span>
+                    </div>
+                    <div>
+                        <div class="section-title">Distribuição Mensal por Tipo</div>
+                        <div class="section-subtitle">Quantidade de eventos agrupados por tipo de atividade</div>
+                    </div>
+                </div>
+            """, unsafe_allow_html=True)
+
+            if not df_cal.empty:
+                chart_col1, chart_col2 = st.columns(2)
+
+                with chart_col1:
+                    # Bar chart by activity type
+                    df_tipo_sum = df_cal.groupby('tipo')['qtd'].sum().reset_index()
+                    df_tipo_sum.columns = ['Tipo', 'Quantidade']
+                    df_tipo_sum = df_tipo_sum.sort_values('Quantidade', ascending=True)
+
+                    colors_bar = [get_color(t) for t in df_tipo_sum['Tipo']]
+                    fig_bar = go.Figure(go.Bar(
+                        x=df_tipo_sum['Quantidade'],
+                        y=df_tipo_sum['Tipo'],
+                        orientation='h',
+                        marker_color=colors_bar,
+                        text=df_tipo_sum['Quantidade'],
+                        textposition='outside'
+                    ))
+                    fig_bar.update_layout(
+                        title='Eventos por Tipo de Atividade',
+                        paper_bgcolor='rgba(0,0,0,0)',
+                        plot_bgcolor='rgba(0,0,0,0)',
+                        font=dict(family='Outfit', size=13),
+                        margin=dict(l=20, r=40, t=40, b=20),
+                        xaxis=dict(showgrid=False),
+                        yaxis=dict(showgrid=False),
+                        height=350
+                    )
+                    st.plotly_chart(fig_bar, use_container_width=True)
+
+                with chart_col2:
+                    # Timeline: events per day of month
+                    df_timeline = df_cal.copy()
+                    df_timeline['dia'] = pd.to_datetime(df_timeline['data_evento']).dt.day
+                    df_day_tipo = df_timeline.groupby(['dia', 'tipo'])['qtd'].sum().reset_index()
+
+                    fig_timeline = go.Figure()
+                    for tipo in df_day_tipo['tipo'].unique():
+                        df_t = df_day_tipo[df_day_tipo['tipo'] == tipo]
+                        fig_timeline.add_trace(go.Bar(
+                            x=df_t['dia'],
+                            y=df_t['qtd'],
+                            name=tipo,
+                            marker_color=get_color(tipo)
+                        ))
+
+                    fig_timeline.update_layout(
+                        title='Eventos por Dia do Mês',
+                        barmode='stack',
+                        paper_bgcolor='rgba(0,0,0,0)',
+                        plot_bgcolor='rgba(0,0,0,0)',
+                        font=dict(family='Outfit', size=13),
+                        margin=dict(l=20, r=20, t=40, b=20),
+                        xaxis=dict(title='Dia', dtick=1),
+                        yaxis=dict(title='Quantidade'),
+                        legend=dict(orientation='h', y=1.15),
+                        height=350
+                    )
+                    st.plotly_chart(fig_timeline, use_container_width=True)
+
+                # --- Grid view: all events ---
+                st.markdown("---")
+                st.markdown("""
+                    <div class="section-header">
+                        <div class="icon-box icon-green">
+                            <span class="mat-icon">table_chart</span>
+                        </div>
+                        <div>
+                            <div class="section-title">Lista Completa de Atividades</div>
+                            <div class="section-subtitle">Todas as atividades do mês ordenadas por data</div>
+                        </div>
+                    </div>
+                """, unsafe_allow_html=True)
+
+                df_grid = df_cal.copy()
+                df_grid['Data'] = pd.to_datetime(df_grid['data_evento']).dt.strftime('%d/%m/%Y')
+                df_grid = df_grid.rename(columns={
+                    'tipo': 'Tipo',
+                    'fazenda': 'Fazenda',
+                    'qtd': 'Quantidade',
+                    'valor_medio': 'Peso Médio (kg)'
+                })
+                df_grid['Tipo'] = df_grid['Tipo'].apply(lambda t: f"{get_icon(t)} {t}")
+                df_grid['Peso Médio (kg)'] = df_grid['Peso Médio (kg)'].apply(
+                    lambda v: f"{v:.1f}" if pd.notna(v) and v else '—'
+                )
+                df_grid = df_grid[['Data', 'Tipo', 'Fazenda', 'Quantidade', 'Peso Médio (kg)']]
+                df_grid = df_grid.sort_values('Data')
+                st.dataframe(df_grid, use_container_width=True, hide_index=True)
+            else:
+                st.info(f"📊 Sem dados para gerar gráficos em {month_name} de {cal_year}.")
+
     except Exception as e:
         st.error(f"❌ Erro: {e}")
     finally:
         if 'conn' in locals(): conn.close()
+
+    # --- PLANEJAMENTO PAGE (separate connection to Vipper_KNW) ---
+    if page == "📐 Planejamento":
+        try:
+            from datetime import timedelta
+            vconn = get_vipper_connection()
+
+            # --- Load all 5 tables ---
+            import warnings
+            warnings.filterwarnings('ignore')
+            df_peso = pd.read_sql("SELECT * FROM tempdb..##TabEvolutionPeso", vconn)
+            df_cms  = pd.read_sql("SELECT * FROM tempdb..##TabEvolutionCMS", vconn)
+            df_frec = pd.read_sql("SELECT * FROM tempdb..##TabEvolutionFRec", vconn)
+            df_f40s = pd.read_sql("SELECT * FROM tempdb..##TabEvolutionF40S", vconn)
+            df_ur20 = pd.read_sql("SELECT * FROM tempdb..##TabEvolutionUr20", vconn)
+            vconn.close()
+
+            if df_peso.empty:
+                st.warning("Nenhum dado de planejamento encontrado nas tabelas temporárias do Vipper_KNW.")
+            else:
+                # --- Detect number of periods dynamically ---
+                n_periods = 0
+                for i in range(1, 10):
+                    if f'Peso{i}' in df_peso.columns and df_peso[f'Peso{i}'].notna().any():
+                        n_periods = i
+                    else:
+                        break
+
+                # --- Compute period dates: P1=base+12d, P2=P1+30d, P3=P2+30d ---
+                base_date = pd.to_datetime(df_peso['data'].iloc[0])
+                tempo_p1 = int(df_peso['Tempo'].iloc[0]) if pd.notna(df_peso['Tempo'].iloc[0]) else 12
+                period_dates = [base_date]  # P0
+                period_dates.append(base_date + timedelta(days=tempo_p1))  # P1
+                for i in range(2, n_periods + 1):
+                    period_dates.append(period_dates[-1] + timedelta(days=30))
+                period_labels = [f"P{i} ({period_dates[i].strftime('%d/%m')})" for i in range(1, n_periods + 1)]
+
+                # --- Aggregate by Lote ---
+                lotes = sorted(df_peso['cod_lote'].unique())
+                rows = []
+                for lote in lotes:
+                    lp = df_peso[df_peso['cod_lote'] == lote]
+                    lc = df_cms[df_cms['cod_lote'] == lote]
+                    lf = df_frec[df_frec['cod_lote'] == lote]
+                    ls = df_f40s[df_f40s['cod_lote'] == lote]
+                    lu = df_ur20[df_ur20['cod_lote'] == lote]
+                    n_animais = len(lp)
+                    peso_ini = float(lp['Peso'].mean()) if not lp.empty else 0
+
+                    row = {'Lote': str(lote), 'Animais': n_animais, 'Peso Inicial': round(peso_ini, 1)}
+
+                    for i in range(1, n_periods + 1):
+                        pfx = period_labels[i - 1]
+                        # Peso/Ganho/Receita/Valor
+                        row[f'{pfx} Peso'] = round(float(lp[f'Peso{i}'].mean()), 1) if lp[f'Peso{i}'].notna().any() else None
+                        row[f'{pfx} Ganho'] = round(float(lp[f'G{i}'].sum()), 1) if lp[f'G{i}'].notna().any() else None
+                        row[f'{pfx} Receita'] = round(float(lp[f'Rec{i}'].sum()), 2) if lp[f'Rec{i}'].notna().any() else None
+                        # Diária (CMS)
+                        row[f'{pfx} Diária'] = round(float(lc[f'Diaria{i}'].sum()), 2) if not lc.empty and lc[f'Diaria{i}'].notna().any() else None
+                        # Produtos
+                        frec_custo = float(lf[f'Custo{i}'].sum()) if not lf.empty and lf[f'Custo{i}'].notna().any() else 0
+                        f40s_custo = float(ls[f'Custo{i}'].sum()) if not ls.empty and ls[f'Custo{i}'].notna().any() else 0
+                        ur20_custo = float(lu[f'Custo{i}'].sum()) if not lu.empty and lu[f'Custo{i}'].notna().any() else 0
+                        row[f'{pfx} FRec R$'] = round(frec_custo, 2) if frec_custo else None
+                        row[f'{pfx} F40S R$'] = round(f40s_custo, 2) if f40s_custo else None
+                        row[f'{pfx} Ur20 R$'] = round(ur20_custo, 2) if ur20_custo else None
+                        custo_prod = frec_custo + f40s_custo + ur20_custo
+                        diaria_val = row[f'{pfx} Diária'] or 0
+                        custo_total = diaria_val + custo_prod
+                        receita_val = row[f'{pfx} Receita'] or 0
+                        row[f'{pfx} Custo Total'] = round(custo_total, 2)
+                        row[f'{pfx} Saldo'] = round(receita_val - custo_total, 2)
+
+                    rows.append(row)
+
+                df_plan = pd.DataFrame(rows)
+
+                # --- KPI CARDS ---
+                total_animais = int(df_plan['Animais'].sum())
+                receita_total = 0
+                custo_diaria_total = 0
+                custo_prod_total = 0
+                ganho_total = 0
+                for i in range(1, n_periods + 1):
+                    pfx = period_labels[i - 1]
+                    receita_total += df_plan[f'{pfx} Receita'].sum() if f'{pfx} Receita' in df_plan.columns else 0
+                    custo_diaria_total += df_plan[f'{pfx} Diária'].sum() if f'{pfx} Diária' in df_plan.columns else 0
+                    ganho_total += df_plan[f'{pfx} Ganho'].sum() if f'{pfx} Ganho' in df_plan.columns else 0
+                    for prod in ['FRec R$', 'F40S R$', 'Ur20 R$']:
+                        col = f'{pfx} {prod}'
+                        if col in df_plan.columns:
+                            custo_prod_total += df_plan[col].sum() if df_plan[col].notna().any() else 0
+
+                custo_geral = custo_diaria_total + custo_prod_total
+                saldo_geral = receita_total - custo_geral
+
+                st.markdown("---")
+                kpi1, kpi2, kpi3, kpi4 = st.columns(4)
+                kpi1.metric("🐂 Animais", f"{total_animais}")
+                kpi2.metric("📈 Receita Total", f"R$ {receita_total:,.2f}")
+                kpi3.metric("📉 Custo Total", f"R$ {custo_geral:,.2f}")
+                delta_color = "normal" if saldo_geral >= 0 else "inverse"
+                kpi4.metric("💰 Saldo", f"R$ {saldo_geral:,.2f}", delta=f"R$ {saldo_geral:,.2f}", delta_color=delta_color)
+
+                # --- GRID: Evolução por Período e Lote ---
+                st.markdown("---")
+                st.markdown("""
+                    <div class="section-header" style="padding-bottom: 8px; border-bottom: 1px solid rgba(6,78,59,0.12);">
+                        <div class="icon-box icon-green">
+                            <span class="mat-icon">table_chart</span>
+                        </div>
+                        <div>
+                            <div class="section-title">Evolução por Período e Lote</div>
+                            <div class="section-subtitle">Peso, Receita, Custos e Saldo a cada período</div>
+                        </div>
+                    </div>
+                """, unsafe_allow_html=True)
+
+                # Build display dataframe
+                display_cols = ['Lote', 'Animais', 'Peso Inicial']
+                for i in range(1, n_periods + 1):
+                    pfx = period_labels[i - 1]
+                    display_cols.extend([f'{pfx} Peso', f'{pfx} Ganho', f'{pfx} Receita',
+                                         f'{pfx} Diária', f'{pfx} Custo Total', f'{pfx} Saldo'])
+                existing_cols = [c for c in display_cols if c in df_plan.columns]
+                df_display = df_plan[existing_cols].copy()
+
+                # Add TOTAL row
+                total_row = {}
+                for col in df_display.columns:
+                    if col == 'Lote':
+                        total_row[col] = 'TOTAL'
+                    elif col == 'Animais':
+                        total_row[col] = int(df_display[col].sum())
+                    elif col == 'Peso Inicial':
+                        total_row[col] = round(float(df_display[col].mean()), 1)
+                    elif 'Peso' in col:
+                        total_row[col] = round(float(df_display[col].mean()), 1) if df_display[col].notna().any() else None
+                    else:
+                        total_row[col] = round(float(df_display[col].sum()), 2) if df_display[col].notna().any() else None
+                df_display = pd.concat([df_display, pd.DataFrame([total_row])], ignore_index=True)
+                df_display = df_display.fillna('—')
+
+                st.dataframe(df_display, use_container_width=True, hide_index=True)
+
+                # --- TOTALS BREAKDOWN ---
+                st.markdown("---")
+                tot_col1, tot_col2 = st.columns(2)
+                with tot_col1:
+                    st.markdown("""
+                        <div class="section-header" style="padding-bottom: 8px; border-bottom: 1px solid rgba(190,24,93,0.12);">
+                            <div class="icon-box icon-magenta">
+                                <span class="mat-icon">summarize</span>
+                            </div>
+                            <div>
+                                <div class="section-title">Totalização Geral</div>
+                                <div class="section-subtitle">Resumo financeiro consolidado</div>
+                            </div>
+                        </div>
+                    """, unsafe_allow_html=True)
+
+                    # Build totals per product
+                    frec_total_vol = 0
+                    frec_total_custo = 0
+                    f40s_total_vol = 0
+                    f40s_total_custo = 0
+                    ur20_total_vol = 0
+                    ur20_total_custo = 0
+                    for i in range(1, n_periods + 1):
+                        ci = str(i)
+                        frec_total_vol += float(df_frec[f'C{ci}'].sum()) if df_frec[f'C{ci}'].notna().any() else 0
+                        frec_total_custo += float(df_frec[f'Custo{ci}'].sum()) if df_frec[f'Custo{ci}'].notna().any() else 0
+                        f40s_total_vol += float(df_f40s[f'C{ci}'].sum()) if df_f40s[f'C{ci}'].notna().any() else 0
+                        f40s_total_custo += float(df_f40s[f'Custo{ci}'].sum()) if df_f40s[f'Custo{ci}'].notna().any() else 0
+                        ur20_total_vol += float(df_ur20[f'C{ci}'].sum()) if df_ur20[f'C{ci}'].notna().any() else 0
+                        ur20_total_custo += float(df_ur20[f'Custo{ci}'].sum()) if df_ur20[f'Custo{ci}'].notna().any() else 0
+
+                    totals_data = {
+                        'Item': ['📈 Ganho Total (kg)', '💵 Receita Total (R$)', '🏠 Custo Diárias (R$)',
+                                 '🧪 FRec — Volume (kg)', '🧪 FRec — Custo (R$)',
+                                 '🧪 F40S — Volume (kg)', '🧪 F40S — Custo (R$)',
+                                 '🧪 Ur20 — Volume (kg)', '🧪 Ur20 — Custo (R$)',
+                                 '📦 Custo Total Produtos (R$)', '📉 Custo Total Geral (R$)',
+                                 '💰 SALDO GERAL (R$)'],
+                        'Valor': [f"{ganho_total:,.1f}", f"R$ {receita_total:,.2f}", f"R$ {custo_diaria_total:,.2f}",
+                                  f"{frec_total_vol:,.1f}", f"R$ {frec_total_custo:,.2f}",
+                                  f"{f40s_total_vol:,.1f}", f"R$ {f40s_total_custo:,.2f}",
+                                  f"{ur20_total_vol:,.1f}", f"R$ {ur20_total_custo:,.2f}",
+                                  f"R$ {custo_prod_total:,.2f}", f"R$ {custo_geral:,.2f}",
+                                  f"R$ {saldo_geral:,.2f}"]
+                    }
+                    st.dataframe(pd.DataFrame(totals_data), use_container_width=True, hide_index=True)
+
+                # --- CASH FLOW CHART ---
+                with tot_col2:
+                    st.markdown("""
+                        <div class="section-header" style="padding-bottom: 8px; border-bottom: 1px solid rgba(6,78,59,0.12);">
+                            <div class="icon-box icon-green">
+                                <span class="mat-icon">show_chart</span>
+                            </div>
+                            <div>
+                                <div class="section-title">Fluxo de Caixa por Período</div>
+                                <div class="section-subtitle">Receita vs Custos e Saldo acumulado</div>
+                            </div>
+                        </div>
+                    """, unsafe_allow_html=True)
+
+                    chart_data = []
+                    saldo_acumulado = 0
+                    for i in range(1, n_periods + 1):
+                        pfx = period_labels[i - 1]
+                        rec = float(df_plan[f'{pfx} Receita'].sum()) if f'{pfx} Receita' in df_plan.columns and df_plan[f'{pfx} Receita'].notna().any() else 0
+                        cst = float(df_plan[f'{pfx} Custo Total'].sum()) if f'{pfx} Custo Total' in df_plan.columns and df_plan[f'{pfx} Custo Total'].notna().any() else 0
+                        saldo_acumulado += rec - cst
+                        chart_data.append({'Período': pfx, 'Receita': rec, 'Custo': cst, 'Saldo Acumulado': saldo_acumulado})
+
+                    df_chart = pd.DataFrame(chart_data)
+
+                    fig_cf = go.Figure()
+                    fig_cf.add_trace(go.Bar(x=df_chart['Período'], y=df_chart['Receita'], name='Receita',
+                                            marker_color='#059669'))
+                    fig_cf.add_trace(go.Bar(x=df_chart['Período'], y=df_chart['Custo'], name='Custo',
+                                            marker_color='#be185d'))
+                    fig_cf.add_trace(go.Scatter(x=df_chart['Período'], y=df_chart['Saldo Acumulado'],
+                                                name='Saldo Acumulado', line=dict(color='#d97706', width=3),
+                                                mode='lines+markers'))
+                    fig_cf.update_layout(
+                        barmode='group',
+                        paper_bgcolor='rgba(0,0,0,0)', plot_bgcolor='rgba(0,0,0,0)',
+                        font=dict(family='Outfit', size=13),
+                        margin=dict(t=10, b=40, l=60, r=20),
+                        legend=dict(orientation='h', y=1.15),
+                        yaxis=dict(title='R$')
+                    )
+                    st.plotly_chart(fig_cf, use_container_width=True)
+
+                # --- VENDAS / FATURAMENTO ---
+                st.markdown("---")
+                st.markdown("""
+                    <div class="section-header" style="padding-bottom: 8px; border-bottom: 1px solid rgba(190,24,93,0.12);">
+                        <div class="icon-box icon-magenta">
+                            <span class="mat-icon">point_of_sale</span>
+                        </div>
+                        <div>
+                            <div class="section-title">Projeção de Vendas e Faturamento</div>
+                            <div class="section-subtitle">Valor dos animais ao final de cada período</div>
+                        </div>
+                    </div>
+                """, unsafe_allow_html=True)
+
+                venda_rows = []
+                for lote in lotes:
+                    lp = df_peso[df_peso['cod_lote'] == lote]
+                    n = len(lp)
+                    vr = {'Lote': str(lote), 'Animais': n}
+                    for i in range(1, n_periods + 1):
+                        pfx = period_labels[i - 1]
+                        valor_col = f'Valor{i}'
+                        if valor_col in lp.columns and lp[valor_col].notna().any():
+                            valor_medio = float(lp[valor_col].mean())
+                            vr[f'{pfx} Valor Unitário'] = round(valor_medio, 2)
+                            vr[f'{pfx} Faturamento'] = round(valor_medio * n, 2)
+                        else:
+                            vr[f'{pfx} Valor Unitário'] = None
+                            vr[f'{pfx} Faturamento'] = None
+                    venda_rows.append(vr)
+
+                df_vendas = pd.DataFrame(venda_rows)
+                # Add total
+                vt = {}
+                for col in df_vendas.columns:
+                    if col == 'Lote':
+                        vt[col] = 'TOTAL'
+                    elif col == 'Animais':
+                        vt[col] = int(df_vendas[col].sum())
+                    elif 'Unitário' in col:
+                        vt[col] = round(float(df_vendas[col].mean()), 2) if df_vendas[col].notna().any() else None
+                    else:
+                        vt[col] = round(float(df_vendas[col].sum()), 2) if df_vendas[col].notna().any() else None
+                df_vendas = pd.concat([df_vendas, pd.DataFrame([vt])], ignore_index=True).fillna('—')
+                st.dataframe(df_vendas, use_container_width=True, hide_index=True)
+
+        except Exception as e:
+            st.error(f"❌ Erro ao carregar dados de Planejamento: {e}")
+            st.info("Verifique se as tabelas temporárias ##TabEvolution* estão ativas no SQL Server (sessão Vipper_KNW aberta).")
 
 if __name__ == "__main__":
     main()
