@@ -3,6 +3,7 @@ import streamlit.components.v1 as components
 import pandas as pd
 import pyodbc
 import os
+import base64
 import plotly.express as px
 import plotly.graph_objects as go
 from dotenv import load_dotenv
@@ -754,6 +755,12 @@ def format_grid_df(df, fmt_dict):
                 pass
     return df.fillna('—')
 
+def get_base64_of_bin_file(bin_file):
+    if os.path.exists(bin_file):
+        with open(bin_file, 'rb') as f:
+            data = f.read()
+        return base64.b64encode(data).decode()
+    return None
 
 def main():
     # --- Initialize page state ---
@@ -768,10 +775,21 @@ def main():
     ]
     
     # --- SIDEBAR — Premium Brand ---
-    st.sidebar.markdown("""
+    mago_path = os.path.join(script_dir, '..', 'assets', 'mago_placeholder.png')
+    real_mago = os.path.join(script_dir, '..', 'assets', 'mago.png')
+    
+    # Use real_mago if exists, else placeholder
+    mago_b64 = get_base64_of_bin_file(real_mago) or get_base64_of_bin_file(mago_path)
+    
+    if mago_b64:
+        logo_html = f'<img src="data:image/png;base64,{mago_b64}" style="width:100%; height:100%; object-fit:contain; border-radius:12px;">'
+    else:
+        logo_html = '<span class="mat-icon" style="font-size:28px; color:white;">pets</span>'
+
+    st.sidebar.markdown(f"""
         <div class="esopo-brand">
-            <div class="esopo-logo-box">
-                <span class="mat-icon" style="font-size:28px; color:white;">pets</span>
+            <div class="esopo-logo-box" style="padding:0; overflow:hidden;">
+                {logo_html}
             </div>
             <div class="esopo-brand-title">ESOPO</div>
             <div class="esopo-brand-subtitle">Pecuária de Precisão</div>
@@ -827,22 +845,29 @@ def main():
     
     st.sidebar.markdown("---")
     
-    st.sidebar.markdown("""
+    pecuarius_path = os.path.join(script_dir, '..', 'assets', 'pecuarius.jpg')
+    pecuarius_b64 = get_base64_of_bin_file(pecuarius_path)
+    
+    if pecuarius_b64:
+        db_logo = f'<img src="data:image/jpeg;base64,{pecuarius_b64}" style="width: 140px; margin: 10px 0; border-radius: 8px;">'
+    else:
+        db_logo = '<div style="font-size: 1.1rem; font-weight: 800; color: #f8fafc; letter-spacing: 1px; margin: 8px 0;">PECUARIUS</div>'
+
+    st.sidebar.markdown(f"""
         <div style="
             background: rgba(6, 78, 59, 0.12);
             border: 1px solid rgba(6, 78, 59, 0.25);
             border-radius: 12px;
             padding: 16px;
             margin: 8px 0;
+            text-align: center;
         ">
-            <div style="font-size: 0.75rem; color: #94a3b8; text-transform: uppercase; letter-spacing: 1px; margin-bottom: 8px;">
-                Sistema
+            <div style="font-size: 0.75rem; color: #94a3b8; text-transform: uppercase; letter-spacing: 1px; margin-bottom: 4px;">
+                Powered by
             </div>
-            <div style="font-size: 0.9rem; font-weight: 600; color: #f8fafc;">
-                Esopo v1.0
-            </div>
-            <div style="font-size: 0.75rem; color: #64748b; margin-top: 4px;">
-                Gestão de Pecuária de Precisão
+            {db_logo}
+            <div style="font-size: 0.70rem; color: #64748b; margin-top: 4px;">
+                Gestão Global de Bovinos
             </div>
         </div>
     """, unsafe_allow_html=True)
@@ -1026,14 +1051,13 @@ def main():
                     )
 
         elif page == "📊 Evolução de Peso":
-            # --- Perspective selector with Material-style icons ---
-            perspective_map = {"💰 Vendas": "Vendas", "🛒 Compras": "Compras", "🐣 Nascimentos": "Nascimentos"}
-            sub_page_raw = st.radio(
+            # --- Perspective selector (No icons as requested) ---
+            perspective_map = {"Vendas": "Vendas", "Compras": "Compras", "Nascimentos": "Nascimentos", "Abates": "Abates"}
+            sub_page = st.radio(
                 "Selecione a perspectiva de análise:",
                 list(perspective_map.keys()),
                 horizontal=True
             )
-            sub_page = perspective_map[sub_page_raw]
             
             # Sub-filters for all perspectives
             f_col1, f_col2 = st.columns([1, 2])
@@ -1085,6 +1109,10 @@ def main():
                             FROM cad_venda cv JOIN Tab_criador tc ON cv.cod_criador = tc.cod_criador
                             WHERE cv.cod_criador IN ({b_str}) AND cv.data >= DATEADD(month, -{periodo_meses}, GETDATE())
                         ),
+                        FW AS (
+                            SELECT cod_animal, peso, ROW_NUMBER() OVER (PARTITION BY cod_animal ORDER BY data ASC) as rn
+                            FROM cad_pesagem_corte
+                        ),
                         LW AS (
                             SELECT cod_animal, peso, ROW_NUMBER() OVER (PARTITION BY cod_animal ORDER BY data DESC) as rn
                             FROM cad_pesagem_corte
@@ -1102,13 +1130,14 @@ def main():
                                CASE WHEN cf.origem = 'N' THEN cf.dt_nascimento ELSE cf.dt_compra END as di,
                                DATEDIFF(day, CASE WHEN cf.origem = 'N' THEN cf.dt_nascimento ELSE cf.dt_compra END, s.dtv) as td,
                                CASE WHEN cf.origem = 'N' THEN 'NASCIMENTO: ' + CAST(FORMAT(cf.dt_nascimento, 'MM/yyyy') AS VARCHAR) ELSE e.grp END as og,
-                               ISNULL(e.pe, 40.0) as pi,
+                               CASE WHEN cf.origem = 'N' THEN 40.0 ELSE COALESCE(NULLIF(e.pe, 0), fw.peso) END as pi,
                                e.dte as data_compra_raw, e.forn as fornecedor_raw,
                                pm.peso_morto,
                                pvenda.peso as peso_vivo_abate
                         FROM cad_fichario cf
                         JOIN Sale s ON cf.cod_animal = s.cod_animal
                         LEFT JOIN Entry e ON cf.cod_animal = e.cod_animal
+                        LEFT JOIN FW fw ON cf.cod_animal = fw.cod_animal AND fw.rn = 1
                         LEFT JOIN LW lw ON cf.cod_animal = lw.cod_animal AND lw.rn = 1
                         LEFT JOIN PesoMorto pm ON cf.cod_animal = pm.Cod_Animal AND s.dtv = pm.Data
                         LEFT JOIN PesagemVenda pvenda ON cf.cod_animal = pvenda.cod_animal AND s.dtv = pvenda.data
@@ -1268,7 +1297,11 @@ def main():
                     s_str = ", ".join([f"'{str(i)}'" for i in s_ids])
                     
                     sql_c = f"""
-                        WITH LW AS (
+                        WITH FW AS (
+                            SELECT cod_animal, peso, ROW_NUMBER() OVER (PARTITION BY cod_animal ORDER BY data ASC) as rn
+                            FROM cad_pesagem_corte
+                        ),
+                        LW AS (
                             SELECT cod_animal, peso, ROW_NUMBER() OVER (PARTITION BY cod_animal ORDER BY data DESC) as rn
                             FROM cad_pesagem_corte
                         ),
@@ -1285,7 +1318,7 @@ def main():
                             FROM cad_morte
                         )
                         SELECT cf.id_animal, cf.cod_animal, tc.descricao as fornecedor, 
-                               cc.data as dt_compra, cc.peso as pi,
+                               cc.data as dt_compra, COALESCE(NULLIF(cc.peso, 0), fw.peso) as pi,
                                ISNULL(lw.peso, cc.peso) as pf, 
                                DATEDIFF(day, cc.data, ISNULL(si.dtv, ISNULL(mi.dt_morte, GETDATE()))) as td,
                                si.cliente as destino_cliente,
@@ -1301,6 +1334,7 @@ def main():
                         FROM cad_fichario cf
                         JOIN cad_compra cc ON cf.cod_animal = cc.cod_animal
                         JOIN Tab_criador tc ON cc.cod_criador = tc.cod_criador
+                        LEFT JOIN FW fw ON cf.cod_animal = fw.cod_animal AND fw.rn = 1
                         LEFT JOIN LW lw ON cf.cod_animal = lw.cod_animal AND lw.rn = 1
                         LEFT JOIN SaleInfo si ON cf.cod_animal = si.cod_animal
                         LEFT JOIN MorteInfo mi ON cf.cod_animal = mi.cod_animal
@@ -1574,6 +1608,171 @@ def main():
                 else:
                     st.info("Nenhum dado encontrado para os filtros selecionados.")
 
+            # =====================================================
+            # ABATES PERSPECTIVE (Slaughter Analysis)
+            # =====================================================
+            elif sub_page == "Abates":
+                # Slaughters are defined by animals in CPM with Venda matching date/buyer/dt_inclusao
+                sql_abates = f"""
+                    WITH FW AS (
+                        SELECT cod_animal, peso, ROW_NUMBER() OVER (PARTITION BY cod_animal ORDER BY data ASC) as rn
+                        FROM cad_pesagem_corte
+                    )
+                    SELECT 
+                        m.Data as dt_abate,
+                        cr.descricao as comprador,
+                        tf.descricao as fazenda,
+                        m.Cod_Animal as id_animal,
+                        (m.Peso_BDQ + m.Peso_BEQ) as peso_morto,
+                        (m.Peso_BDQ + m.Peso_BEQ) / NULLIF(pc.peso, 0) * 100 as rendimento,
+                        m.DIP,
+                        DATEDIFF(day, f.dt_nascimento, m.Data) as idade_dias,
+                        DATEDIFF(day, ISNULL(c.data, f.dt_nascimento), m.Data) as permanencia,
+                        (pc.peso - CASE WHEN f.origem = 'N' THEN 40.0 ELSE COALESCE(NULLIF(c.peso, 0), fw.peso) END) / NULLIF(DATEDIFF(day, ISNULL(c.data, f.dt_nascimento), m.Data), 0) as gmd
+                    FROM Cad_peso_morto m
+                    JOIN cad_venda v ON m.Cod_Animal = v.cod_animal AND m.Data = v.Data
+                    JOIN Tab_criador cr ON v.cod_criador = cr.cod_criador
+                    JOIN cad_fichario f ON m.Cod_Animal = f.cod_animal
+                    JOIN Tab_fazenda tf ON f.cod_fazenda = tf.cod_fazenda
+                    LEFT JOIN cad_pesagem_corte pc ON m.Cod_Animal = pc.cod_animal AND m.Data = pc.data
+                    LEFT JOIN cad_compra c ON m.Cod_Animal = c.cod_animal
+                    LEFT JOIN FW fw ON f.Cod_Animal = fw.cod_animal AND fw.rn = 1
+                    WHERE f.cod_fazenda IN ({farm_ids_str})
+                    AND m.Data >= DATEADD(month, -{periodo_meses}, GETDATE())
+                """
+                df_a = pd.read_sql(sql_abates, conn)
+                
+                if not df_a.empty:
+                    # Filter Buyers (Moved to top column like Sales)
+                    buyer_list = sorted(df_a['comprador'].unique())
+                    with f_col2:
+                        sel_buyers = st.multiselect("Filtrar Compradores:", buyer_list, default=buyer_list, key="abates_buyers")
+                    
+                    if sel_buyers:
+                        df_a = df_a[df_a['comprador'].isin(sel_buyers)]
+                    
+                    if not df_a.empty:
+                        # Identify Slaughter Batches (Unique combinations of Date and Farm)
+                        df_a['batch_id'] = df_a['dt_abate'].astype(str) + "_" + df_a['fazenda'].astype(str)
+                        batches = df_a.groupby('batch_id').agg({
+                            'dt_abate': 'first',
+                            'fazenda': 'first',
+                            'comprador': 'first',
+                            'id_animal': 'count',
+                            'peso_morto': 'mean',
+                            'rendimento': 'mean'
+                        }).sort_values('dt_abate', ascending=False).reset_index()
+                        
+                        st.write("---")
+                        st.write("### 🥩 Lotes de Abate (Selecione um Card)")
+                        
+                        # Display Cards in Columns
+                        card_cols = st.columns(3)
+                        selected_batch_id = st.session_state.get('selected_abate_batch', None)
+                        
+                        for idx, b in batches.iterrows():
+                            col_idx = idx % 3
+                            with card_cols[col_idx]:
+                                # Style card based on selection
+                                is_sel = b['batch_id'] == selected_batch_id
+                                border_color = "#be185d" if is_sel else "#e2e8f0"
+                                label = "✅ Selecionado" if is_sel else "Ver Detalhes"
+                                
+                                st.markdown(f"""
+                                    <div style="border: 2px solid {border_color}; border-radius: 12px; padding: 15px; background: whitesmoke; margin-bottom: 15px;">
+                                        <b style="font-size: 1.1em; color: #1e293b;">📅 {b['dt_abate'].strftime('%d/%m/%Y')}</b><br>
+                                        <span style="color: #64748b; font-size: 0.9em;">🚜 {b['fazenda']}</span><br>
+                                        <hr style="margin: 8px 0; border: 0.5px solid #cbd5e1;">
+                                        <div style="display: flex; justify-content: space-between;">
+                                            <span>🐂 <b>{b['id_animal']}</b> cab.</span>
+                                            <span>⚖️ <b>{b['peso_morto']:.1f}</b> kg</span>
+                                        </div>
+                                    </div>
+                                """, unsafe_allow_html=True)
+                                
+                                if st.button(label, key=f"btn_{b['batch_id']}"):
+                                    st.session_state['selected_abate_batch'] = b['batch_id']
+                                    st.rerun()
+
+                        # Detailing Section
+                        if selected_batch_id:
+                            st.write("---")
+                            df_sel = df_a[df_a['batch_id'] == selected_batch_id]
+                            batch_info = batches[batches['batch_id'] == selected_batch_id].iloc[0]
+                            
+                            st.markdown(f"### 🔍 Detalhes do Abate: {batch_info['dt_abate'].strftime('%d/%m/%Y')} ({batch_info['comprador']})")
+                            
+                            det_col1, det_col2 = st.columns([1, 1])
+                            
+                            with det_col1:
+                                st.write("**Resumo por DIP (Dentes):**")
+                                # DIP Grid
+                                agg_dip = {
+                                    'id_animal': 'count',
+                                    'peso_morto': 'mean',
+                                    'rendimento': 'mean',
+                                    'gmd': 'mean'
+                                }
+                                res_dip = df_sel.groupby('DIP').agg(agg_dip).reset_index()
+                                res_dip.columns = ['DIP', 'Quantidade', 'Peso Mortos (kg)', 'Rendimento (%)', 'GMD (kg/dia)']
+                                
+                                # Totals
+                                totals = pd.DataFrame([{
+                                    'DIP': 'TOTAL',
+                                    'Quantidade': res_dip['Quantidade'].sum(),
+                                    'Peso Mortos (kg)': df_sel['peso_morto'].mean(),
+                                    'Rendimento (%)': df_sel['rendimento'].mean(),
+                                    'GMD (kg/dia)': df_sel['gmd'].mean()
+                                }])
+                                res_dip = pd.concat([res_dip, totals], ignore_index=True)
+                                
+                                fmt_dip = {
+                                    'Peso Mortos (kg)': '{:.1f}',
+                                    'Rendimento (%)': '{:.1f}%',
+                                    'GMD (kg/dia)': '{:.3f}'
+                                }
+                                res_dip_disp = format_grid_df(res_dip, fmt_dip)
+                                st.dataframe(res_dip_disp, use_container_width=True, hide_index=True)
+                                
+                            with det_col2:
+                                st.write("**Gráfico de Regressão:**")
+                                reg_var = st.selectbox(
+                                    "Variável de análise (Eixo X):",
+                                    ["DIP (Idade Dental)", "Idade (Dias)", "Tempo Permanência"],
+                                    key="abate_reg_var"
+                                )
+                                var_map = {
+                                    "DIP (Idade Dental)": "DIP",
+                                    "Idade (Dias)": "idade_dias",
+                                    "Tempo Permanência": "permanencia"
+                                }
+                                x_field = var_map[reg_var]
+                                
+                                fig_reg = px.scatter(
+                                    df_sel, x=x_field, y="rendimento",
+                                    trendline="ols",
+                                    labels={x_field: reg_var, "rendimento": "Rendimento (%)"},
+                                    title=f"Rendimento (%) vs {reg_var}",
+                                    template="plotly_white",
+                                    color_discrete_sequence=['#be185d']
+                                )
+                                fig_reg.update_layout(margin=dict(l=20, r=20, t=40, b=20))
+                                st.plotly_chart(fig_reg, use_container_width=True)
+                                
+                                # Regression insights
+                                with st.expander("📈 Insights Adicionais (Peso Morto & GMD)"):
+                                    col_ins1, col_ins2 = st.columns(2)
+                                    with col_ins1:
+                                        fig_ins1 = px.scatter(df_sel, x=x_field, y="peso_morto", trendline="ols", title="Peso Morto vs Variável")
+                                        st.plotly_chart(fig_ins1, use_container_width=True)
+                                    with col_ins2:
+                                        fig_ins2 = px.scatter(df_sel, x=x_field, y="gmd", trendline="ols", title="GMD vs Variável")
+                                        st.plotly_chart(fig_ins2, use_container_width=True)
+                        else:
+                            st.info("👆 Selecione um card acima para ver o detalhamento do abate.")
+                else:
+                    st.info("Nenhum abate encontrado no período selecionado.")
+            
         elif page == "📋 Ficha de Animais":
             st.markdown("""
                 <div class="section-header">
@@ -1678,7 +1877,7 @@ def main():
             
             sql_lote = f"""
                 WITH UltPes AS (
-                    SELECT cod_animal, peso, data, GPD,
+                    SELECT cod_animal, peso, data, GPM,
                            ROW_NUMBER() OVER (PARTITION BY cod_animal ORDER BY data DESC) as rn
                     FROM cad_pesagem_corte
                 ),
@@ -1691,8 +1890,8 @@ def main():
                     tf.descricao as Fazenda, 
                     ISNULL(tl.descricao, '(Sem Lote)') as Lote,
                     COUNT(c.cod_animal) as Qtd,
-                    AVG(up.peso + (DATEDIFF(day, up.data, GETDATE()) * ISNULL(up.GPD, 0))) as PesoProjetado,
-                    AVG(up.GPD) as GMD_Medio,
+                    AVG(up.peso + (DATEDIFF(day, up.data, GETDATE()) * ISNULL(up.GPM, 0))) as PesoProjetado,
+                    AVG(up.GPM) as GMD_Medio,
                     MAX(up.data) as Ult_Pesagem,
                     DATEDIFF(day, MAX(up.data), GETDATE()) as Dias_Ult,
                     MAX(ap.data) as Ante_Pen
