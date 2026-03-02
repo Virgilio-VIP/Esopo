@@ -742,6 +742,19 @@ def format_br(val):
     if val is None: return "0,00"
     return f"{float(val):,.2f}".replace(",", "X").replace(".", ",").replace("X", ".")
 
+def format_grid_df(df, fmt_dict):
+    """Round numeric columns according to fmt_dict and replace NaN with '—'."""
+    for col, spec in fmt_dict.items():
+        if col in df.columns:
+            # Extract decimal places from format spec like '{:.1f}', '{:.3f}', '{:.0f}', '{:.1f}%'
+            try:
+                decimals = int(spec.split('.')[1][0])
+                df[col] = df[col].apply(lambda x: round(float(x), decimals) if pd.notna(x) and x != '—' else x)
+            except (ValueError, IndexError, TypeError):
+                pass
+    return df.fillna('—')
+
+
 def main():
     # --- Initialize page state ---
     if "current_page" not in st.session_state:
@@ -1013,14 +1026,31 @@ def main():
                     )
 
         elif page == "📊 Evolução de Peso":
-            sub_page = st.radio("Selecione a perspectiva de análise:", ["📤 Vendas", "📥 Compras", "🐣 Nascimentos"], horizontal=True)
+            # --- Perspective selector with Material-style icons ---
+            perspective_map = {"💰 Vendas": "Vendas", "🛒 Compras": "Compras", "🐣 Nascimentos": "Nascimentos"}
+            sub_page_raw = st.radio(
+                "Selecione a perspectiva de análise:",
+                list(perspective_map.keys()),
+                horizontal=True
+            )
+            sub_page = perspective_map[sub_page_raw]
             
             # Sub-filters for all perspectives
             f_col1, f_col2 = st.columns([1, 2])
             with f_col1:
                 periodo_meses = st.slider("Período de Análise (Meses):", 0, 60, 12, key="peso_slider")
+            
+            # Color metric scale
+            custom_scale = [
+                [0.0, "#be185d"],
+                [0.5, "#d97706"],
+                [1.0, "#064e3b"]
+            ]
 
-            if sub_page == "📤 Vendas":
+            # =====================================================
+            # VENDAS PERSPECTIVE
+            # =====================================================
+            if sub_page == "Vendas":
                 st.markdown("""
                     <div class="section-header">
                         <div class="icon-box icon-magenta">
@@ -1033,7 +1063,6 @@ def main():
                     </div>
                 """, unsafe_allow_html=True)
                 
-                # Fetch Buyers
                 query_b = f"SELECT DISTINCT tc.cod_criador, tc.descricao FROM cad_venda cv JOIN Tab_criador tc ON cv.cod_criador = tc.cod_criador JOIN cad_fichario cf ON cv.cod_animal = cf.cod_animal WHERE cf.cod_fazenda IN ({farm_ids_str}) AND cv.data >= DATEADD(month, -{periodo_meses}, GETDATE())"
                 df_b = pd.read_sql(query_b, conn)
                 with f_col2:
@@ -1059,38 +1088,60 @@ def main():
                         LW AS (
                             SELECT cod_animal, peso, ROW_NUMBER() OVER (PARTITION BY cod_animal ORDER BY data DESC) as rn
                             FROM cad_pesagem_corte
+                        ),
+                        PesoMorto AS (
+                            SELECT Cod_Animal, Data, (Peso_BDQ + Peso_BEQ) as peso_morto
+                            FROM Cad_peso_morto
+                        ),
+                        PesagemVenda AS (
+                            SELECT cod_animal, data, peso
+                            FROM cad_pesagem_corte
                         )
-                        SELECT cf.id_animal, cf.origem, s.comp, s.dtv, 
+                        SELECT cf.id_animal, cf.cod_animal, cf.origem, s.comp, s.dtv, 
                                ISNULL(lw.peso, s.pev_orig) as pv,
                                CASE WHEN cf.origem = 'N' THEN cf.dt_nascimento ELSE cf.dt_compra END as di,
                                DATEDIFF(day, CASE WHEN cf.origem = 'N' THEN cf.dt_nascimento ELSE cf.dt_compra END, s.dtv) as td,
                                CASE WHEN cf.origem = 'N' THEN 'NASCIMENTO: ' + CAST(FORMAT(cf.dt_nascimento, 'MM/yyyy') AS VARCHAR) ELSE e.grp END as og,
                                ISNULL(e.pe, 40.0) as pi,
-                               e.dte as data_compra_raw, e.forn as fornecedor_raw
+                               e.dte as data_compra_raw, e.forn as fornecedor_raw,
+                               pm.peso_morto,
+                               pvenda.peso as peso_vivo_abate
                         FROM cad_fichario cf
                         JOIN Sale s ON cf.cod_animal = s.cod_animal
                         LEFT JOIN Entry e ON cf.cod_animal = e.cod_animal
                         LEFT JOIN LW lw ON cf.cod_animal = lw.cod_animal AND lw.rn = 1
+                        LEFT JOIN PesoMorto pm ON cf.cod_animal = pm.Cod_Animal AND s.dtv = pm.Data
+                        LEFT JOIN PesagemVenda pvenda ON cf.cod_animal = pvenda.cod_animal AND s.dtv = pvenda.data
                         WHERE cf.cod_fazenda IN ({farm_ids_str})
                     """
                     df = pd.read_sql(sql, conn)
                     if not df.empty:
                         df['gt'] = df['pv'] - df['pi']
                         df['gmd'] = df['gt'] / df['td'].replace(0, 1)
+                        df['rendimento'] = df.apply(
+                            lambda r: (r['peso_morto'] / r['peso_vivo_abate'] * 100) 
+                            if pd.notna(r['peso_morto']) and pd.notna(r['peso_vivo_abate']) and r['peso_vivo_abate'] > 0 
+                            else None, axis=1
+                        )
                         
-                        custom_scale = [
-                            [0.0, "#be185d"], # Magenta for low performance
-                            [0.5, "#d97706"], # Amber for average
-                            [1.0, "#064e3b"]  # Dark Green for high performance
-                        ]
+                        # --- Color metric selector ---
+                        metric_col1, metric_col2 = st.columns([3, 1])
+                        with metric_col2:
+                            color_metric = st.selectbox(
+                                "Métrica de cor:",
+                                ["GMD", "Peso Vivo", "Permanência"],
+                                key="vendas_color_metric"
+                            )
+                        color_map = {"GMD": "gmd", "Peso Vivo": "pv", "Permanência": "td"}
+                        color_field = color_map[color_metric]
                         
                         fig_sun = px.sunburst(
                             df, 
                             path=['comp', 'og'], 
                             values='pv', 
-                            color='gmd', 
+                            color=color_field, 
                             color_continuous_scale=custom_scale,
-                            title="Hierarquia: Comprador > Origem"
+                            title=f"Hierarquia: Comprador > Origem (Cor = {color_metric})"
                         )
                         fig_sun.update_layout(
                             paper_bgcolor='rgba(0,0,0,0)',
@@ -1107,7 +1158,7 @@ def main():
                                 </div>
                                 <div>
                                     <div class="section-title">Árvore de Decomposição</div>
-                                    <div class="section-subtitle">Clique nos blocos para detalhar: Venda → Cliente → Compra → Fornecedor</div>
+                                    <div class="section-subtitle">Clique nos blocos para detalhar: Total → Cliente → Venda → Fornecedor → Compra</div>
                                 </div>
                             </div>
                         """, unsafe_allow_html=True)
@@ -1123,9 +1174,9 @@ def main():
                             df_tree,
                             path=[px.Constant("Total Vendas"), 'Cliente', 'Venda', 'Fornecedor', 'Compra'],
                             values='Qtd',
-                            color='gmd',
+                            color=color_field,
                             color_continuous_scale=custom_scale,
-                            title="Decomposição da Cadeia (Cor = GMD)"
+                            title=f"Decomposição da Cadeia (Cor = {color_metric})"
                         )
                         fig_tree.update_traces(textinfo="label+value")
                         fig_tree.update_layout(
@@ -1134,12 +1185,51 @@ def main():
                         )
                         st.plotly_chart(fig_tree, use_container_width=True)
                         
-                        st.markdown("<div class='section-title' style='margin: 16px 0 12px;'>Detalhamento da Performance</div>", unsafe_allow_html=True)
-                        res = df.groupby(['comp', 'og']).agg({'id_animal': 'count', 'pv': 'mean', 'td': 'mean', 'gt': 'mean', 'gmd': 'mean'}).reset_index()
-                        res.columns = ['Comprador', 'Origem (Lote/Mês)', 'Qtd', 'Peso Venda (Avg)', 'Permanência (Dias)', 'Ganho Total', 'GMD (Kg/dia)']
-                        st.dataframe(res.style.format({'Peso Venda (Avg)': '{:.1f}', 'Permanência (Dias)': '{:.0f}', 'Ganho Total': '{:.1f}', 'GMD (Kg/dia)': '{:.3f}'}), use_container_width=True, hide_index=True)
+                        # --- Performance Grid - Sensitive to decomposition level ---
+                        st.markdown("""
+                            <div class="section-header">
+                                <div class="icon-box icon-green">
+                                    <span class="mat-icon">table_chart</span>
+                                </div>
+                                <div>
+                                    <div class="section-title">Detalhamento da Performance</div>
+                                    <div class="section-subtitle">Selecione o nível de agrupamento</div>
+                                </div>
+                            </div>
+                        """, unsafe_allow_html=True)
+                        
+                        nivel = st.radio(
+                            "Nível de agrupamento:",
+                            ["Por Fornecedor (Nível 4)", "Por Compra/Origem (Nível 5)"],
+                            horizontal=True,
+                            key="vendas_nivel_grid"
+                        )
+                        
+                        if nivel == "Por Fornecedor (Nível 4)":
+                            df['fornecedor_agg'] = df['fornecedor_raw'].fillna('ORIGEM INTERNA')
+                            agg_cols = {'id_animal': 'count', 'pv': 'mean', 'td': 'mean', 'gt': 'mean', 'gmd': 'mean', 'peso_morto': 'mean', 'rendimento': 'mean'}
+                            res = df.groupby(['comp', 'fornecedor_agg']).agg(agg_cols).reset_index()
+                            res.columns = ['Comprador', 'Fornecedor', 'Qtd', 'Peso Venda (kg)', 'Permanência (Dias)', 'Ganho Total (kg)', 'GMD (kg/dia)', 'Peso Morto (kg)', 'Rendimento (%)']
+                        else:
+                            agg_cols = {'id_animal': 'count', 'pv': 'mean', 'td': 'mean', 'gt': 'mean', 'gmd': 'mean', 'peso_morto': 'mean', 'rendimento': 'mean'}
+                            res = df.groupby(['comp', 'og']).agg(agg_cols).reset_index()
+                            res.columns = ['Comprador', 'Origem (Lote/Mês)', 'Qtd', 'Peso Venda (kg)', 'Permanência (Dias)', 'Ganho Total (kg)', 'GMD (kg/dia)', 'Peso Morto (kg)', 'Rendimento (%)']
+                        
+                        fmt = {
+                            'Peso Venda (kg)': '{:.1f}',
+                            'Permanência (Dias)': '{:.0f}',
+                            'Ganho Total (kg)': '{:.1f}',
+                            'GMD (kg/dia)': '{:.3f}',
+                            'Peso Morto (kg)': '{:.1f}',
+                            'Rendimento (%)': '{:.1f}%'
+                        }
+                        res = format_grid_df(res, fmt)
+                        st.dataframe(res, use_container_width=True, hide_index=True)
 
-            elif sub_page == "📥 Compras":
+            # =====================================================
+            # COMPRAS PERSPECTIVE (Inverse decomposition)
+            # =====================================================
+            elif sub_page == "Compras":
                 st.markdown("""
                     <div class="section-header">
                         <div class="icon-box icon-green">
@@ -1147,12 +1237,26 @@ def main():
                         </div>
                         <div>
                             <div class="section-title">Performance de Lotes Comprados</div>
-                            <div class="section-subtitle">Evolução de ganho por fornecedor</div>
+                            <div class="section-subtitle">Decomposição inversa: Compra → Destino</div>
                         </div>
                     </div>
                 """, unsafe_allow_html=True)
                 
-                query_s = f"SELECT DISTINCT tc.cod_criador, tc.descricao FROM cad_compra cc JOIN Tab_criador tc ON cc.cod_criador = tc.cod_criador JOIN cad_fichario cf ON cc.cod_animal = cf.cod_animal WHERE cf.cod_fazenda IN ({farm_ids_str}) AND cc.data >= DATEADD(month, -{periodo_meses}, GETDATE())"
+                # Active/Inactive filter
+                with f_col1:
+                    filtro_status = st.selectbox("Status dos Animais:", ["Apenas Ativos", "Apenas Inativos", "Todos"], key="compras_status")
+                
+                if filtro_status == "Apenas Ativos":
+                    status_filter = "AND cf.cod_categoria NOT IN (SELECT cod_categoria FROM Tab_categoria WHERE morto = 'S' OR vendido = 'S')"
+                elif filtro_status == "Apenas Inativos":
+                    status_filter = "AND cf.cod_categoria IN (SELECT cod_categoria FROM Tab_categoria WHERE morto = 'S' OR vendido = 'S')"
+                else:
+                    status_filter = ""
+                
+                query_s = f"""SELECT DISTINCT tc.cod_criador, tc.descricao 
+                    FROM cad_compra cc JOIN Tab_criador tc ON cc.cod_criador = tc.cod_criador 
+                    JOIN cad_fichario cf ON cc.cod_animal = cf.cod_animal 
+                    WHERE cf.cod_fazenda IN ({farm_ids_str}) AND cc.data >= DATEADD(month, -{periodo_meses}, GETDATE())"""
                 df_s = pd.read_sql(query_s, conn)
                 with f_col2:
                     sel_s = st.multiselect("Filtrar Fornecedores:", options=df_s['descricao'].tolist(), default=df_s['descricao'].tolist())
@@ -1167,40 +1271,140 @@ def main():
                         WITH LW AS (
                             SELECT cod_animal, peso, ROW_NUMBER() OVER (PARTITION BY cod_animal ORDER BY data DESC) as rn
                             FROM cad_pesagem_corte
+                        ),
+                        SaleInfo AS (
+                            SELECT cv.cod_animal, cv.data as dtv, cv.peso as peso_venda, tc.descricao as cliente
+                            FROM cad_venda cv JOIN Tab_criador tc ON cv.cod_criador = tc.cod_criador
+                        ),
+                        PesoMorto AS (
+                            SELECT Cod_Animal, Data, (Peso_BDQ + Peso_BEQ) as peso_morto
+                            FROM Cad_peso_morto
+                        ),
+                        MorteInfo AS (
+                            SELECT cod_animal, data as dt_morte
+                            FROM cad_morte
                         )
-                        SELECT cf.id_animal, tc.descricao as fornecedor, cc.data as dt_compra, cc.peso as pi,
-                               lw.peso as pf, DATEDIFF(day, cc.data, GETDATE()) as td
+                        SELECT cf.id_animal, cf.cod_animal, tc.descricao as fornecedor, 
+                               cc.data as dt_compra, cc.peso as pi,
+                               ISNULL(lw.peso, cc.peso) as pf, 
+                               DATEDIFF(day, cc.data, ISNULL(si.dtv, ISNULL(mi.dt_morte, GETDATE()))) as td,
+                               si.cliente as destino_cliente,
+                               si.dtv as dt_venda,
+                               mi.dt_morte,
+                               CASE 
+                                   WHEN si.dtv IS NOT NULL THEN 'VENDIDO: ' + CAST(FORMAT(si.dtv, 'dd/MM/yyyy') AS VARCHAR) + ' - ' + si.cliente
+                                   WHEN mi.dt_morte IS NOT NULL THEN 'MORTO: ' + CAST(FORMAT(mi.dt_morte, 'dd/MM/yyyy') AS VARCHAR)
+                                   ELSE 'ATIVO'
+                               END as destino,
+                               pm.peso_morto,
+                               pvenda.peso as peso_vivo_abate
                         FROM cad_fichario cf
                         JOIN cad_compra cc ON cf.cod_animal = cc.cod_animal
                         JOIN Tab_criador tc ON cc.cod_criador = tc.cod_criador
                         LEFT JOIN LW lw ON cf.cod_animal = lw.cod_animal AND lw.rn = 1
+                        LEFT JOIN SaleInfo si ON cf.cod_animal = si.cod_animal
+                        LEFT JOIN MorteInfo mi ON cf.cod_animal = mi.cod_animal
+                        LEFT JOIN PesoMorto pm ON cf.cod_animal = pm.Cod_Animal AND si.dtv = pm.Data
+                        LEFT JOIN cad_pesagem_corte pvenda ON cf.cod_animal = pvenda.cod_animal AND si.dtv = pvenda.data
                         WHERE cf.cod_fazenda IN ({farm_ids_str}) AND cc.cod_criador IN ({s_str})
                         AND cc.data >= DATEADD(month, -{periodo_meses}, GETDATE())
-                        AND cf.cod_categoria NOT IN (SELECT cod_categoria FROM Tab_categoria WHERE morto = 'S' OR vendido = 'S')
+                        {status_filter}
                     """
                     df_c = pd.read_sql(sql_c, conn)
                     if not df_c.empty:
                         df_c['gt'] = (df_c['pf'] - df_c['pi']).fillna(0)
                         df_c['gmd'] = df_c['gt'] / df_c['td'].replace(0, 1)
+                        df_c['rendimento'] = df_c.apply(
+                            lambda r: (r['peso_morto'] / r['peso_vivo_abate'] * 100) 
+                            if pd.notna(r['peso_morto']) and pd.notna(r['peso_vivo_abate']) and r['peso_vivo_abate'] > 0 
+                            else None, axis=1
+                        )
                         
-                        fig_bar = px.bar(
-                            df_c.groupby('fornecedor')['gmd'].mean().reset_index(), 
-                            x='fornecedor', 
-                            y='gmd', 
-                            color='gmd', 
+                        # Color metric selector
+                        metric_col1, metric_col2 = st.columns([3, 1])
+                        with metric_col2:
+                            color_metric_c = st.selectbox("Métrica de cor:", ["GMD", "Peso Vivo", "Permanência"], key="compras_color_metric")
+                        color_map_c = {"GMD": "gmd", "Peso Vivo": "pf", "Permanência": "td"}
+                        color_field_c = color_map_c[color_metric_c]
+                        
+                        # Sunburst: Fornecedor > Data Compra
+                        df_c['compra_fmt'] = pd.to_datetime(df_c['dt_compra']).dt.strftime('%d/%m/%Y')
+                        fig_sun_c = px.sunburst(
+                            df_c, path=['fornecedor', 'compra_fmt'],
+                            values='pf', color=color_field_c,
                             color_continuous_scale=custom_scale,
-                            title="GMD Médio por Fornecedor (kg/dia)"
+                            title=f"Hierarquia: Fornecedor > Compra (Cor = {color_metric_c})"
                         )
-                        fig_bar.update_layout(
-                            paper_bgcolor='rgba(0,0,0,0)',
-                            plot_bgcolor='rgba(0,0,0,0)',
-                            font=dict(family="Outfit")
-                        )
-                        st.plotly_chart(fig_bar, use_container_width=True)
+                        fig_sun_c.update_layout(paper_bgcolor='rgba(0,0,0,0)', font=dict(family="Outfit"), title_font=dict(size=20, color="#064e3b"))
+                        st.plotly_chart(fig_sun_c, use_container_width=True)
                         
-                        st.dataframe(df_c.groupby(['fornecedor', 'dt_compra']).agg({'id_animal':'count', 'pi':'mean', 'pf':'mean', 'gt':'mean', 'gmd':'mean'}).reset_index(), use_container_width=True)
+                        st.markdown("---")
+                        st.markdown("""
+                            <div class="section-header">
+                                <div class="icon-box icon-amber">
+                                    <span class="mat-icon">account_tree</span>
+                                </div>
+                                <div>
+                                    <div class="section-title">Árvore de Decomposição</div>
+                                    <div class="section-subtitle">Compra → Fornecedor → Lote → Destino</div>
+                                </div>
+                            </div>
+                        """, unsafe_allow_html=True)
+                        
+                        df_tree_c = df_c.copy()
+                        df_tree_c['Compra'] = df_tree_c['compra_fmt']
+                        df_tree_c['Destino'] = df_tree_c['destino']
+                        df_tree_c['Qtd'] = 1
+                        
+                        fig_tree_c = px.icicle(
+                            df_tree_c,
+                            path=[px.Constant("Total Compras"), 'fornecedor', 'Compra', 'Destino'],
+                            values='Qtd', color=color_field_c,
+                            color_continuous_scale=custom_scale,
+                            title=f"Decomposição (Cor = {color_metric_c})"
+                        )
+                        fig_tree_c.update_traces(textinfo="label+value")
+                        fig_tree_c.update_layout(paper_bgcolor='rgba(0,0,0,0)', font=dict(family="Outfit"))
+                        st.plotly_chart(fig_tree_c, use_container_width=True)
+                        
+                        # Grid - level selector
+                        st.markdown("""
+                            <div class="section-header">
+                                <div class="icon-box icon-green">
+                                    <span class="mat-icon">table_chart</span>
+                                </div>
+                                <div>
+                                    <div class="section-title">Detalhamento da Performance</div>
+                                    <div class="section-subtitle">Selecione o nível de agrupamento</div>
+                                </div>
+                            </div>
+                        """, unsafe_allow_html=True)
+                        
+                        nivel_c = st.radio(
+                            "Nível de agrupamento:",
+                            ["Por Fornecedor", "Por Lote (Data Compra)"],
+                            horizontal=True, key="compras_nivel_grid"
+                        )
+                        
+                        agg_c = {'id_animal': 'count', 'pi': 'mean', 'pf': 'mean', 'td': 'mean', 'gt': 'mean', 'gmd': 'mean', 'peso_morto': 'mean', 'rendimento': 'mean'}
+                        if nivel_c == "Por Fornecedor":
+                            res_c = df_c.groupby('fornecedor').agg(agg_c).reset_index()
+                            res_c.columns = ['Fornecedor', 'Qtd', 'Peso Compra (kg)', 'Peso Atual (kg)', 'Permanência (Dias)', 'Ganho Total (kg)', 'GMD (kg/dia)', 'Peso Morto (kg)', 'Rendimento (%)']
+                        else:
+                            df_c['dt_compra_fmt'] = pd.to_datetime(df_c['dt_compra']).dt.strftime('%d/%m/%Y')
+                            res_c = df_c.groupby(['fornecedor', 'dt_compra_fmt']).agg(agg_c).reset_index()
+                            res_c.columns = ['Fornecedor', 'Data Compra', 'Qtd', 'Peso Compra (kg)', 'Peso Atual (kg)', 'Permanência (Dias)', 'Ganho Total (kg)', 'GMD (kg/dia)', 'Peso Morto (kg)', 'Rendimento (%)']
+                        
+                        fmt_c = {'Peso Compra (kg)': '{:.1f}', 'Peso Atual (kg)': '{:.1f}', 'Permanência (Dias)': '{:.0f}', 'Ganho Total (kg)': '{:.1f}', 'GMD (kg/dia)': '{:.3f}', 'Peso Morto (kg)': '{:.1f}', 'Rendimento (%)': '{:.1f}%'}
+                        res_c = format_grid_df(res_c, fmt_c)
+                        st.dataframe(res_c, use_container_width=True, hide_index=True)
+                    else:
+                        st.info("Nenhum dado encontrado para os filtros selecionados.")
 
-            elif sub_page == "🐣 Nascimentos":
+            # =====================================================
+            # NASCIMENTOS PERSPECTIVE
+            # =====================================================
+            elif sub_page == "Nascimentos":
                 st.markdown("""
                     <div class="section-header">
                         <div class="icon-box icon-green">
@@ -1208,42 +1412,167 @@ def main():
                         </div>
                         <div>
                             <div class="section-title">Evolução de Animais Nascidos</div>
-                            <div class="section-subtitle">GMD e eficiência de cria</div>
+                            <div class="section-subtitle">Decomposição por mês, sexo e destino</div>
                         </div>
                     </div>
                 """, unsafe_allow_html=True)
+                
+                # Filters: gender + status
+                with f_col2:
+                    gc1, gc2 = st.columns(2)
+                    with gc1:
+                        filtro_sexo = st.selectbox("Sexo:", ["Ambos", "Macho (M)", "Fêmea (F)"], key="nasc_sexo")
+                    with gc2:
+                        filtro_status_n = st.selectbox("Status:", ["Apenas Ativos", "Apenas Inativos", "Todos"], key="nasc_status")
+                
+                sexo_filter = ""
+                if filtro_sexo == "Macho (M)":
+                    sexo_filter = "AND cf.sexo = 'M'"
+                elif filtro_sexo == "Fêmea (F)":
+                    sexo_filter = "AND cf.sexo = 'F'"
+                
+                if filtro_status_n == "Apenas Ativos":
+                    status_filter_n = "AND cf.cod_categoria NOT IN (SELECT cod_categoria FROM Tab_categoria WHERE morto = 'S' OR vendido = 'S')"
+                elif filtro_status_n == "Apenas Inativos":
+                    status_filter_n = "AND cf.cod_categoria IN (SELECT cod_categoria FROM Tab_categoria WHERE morto = 'S' OR vendido = 'S')"
+                else:
+                    status_filter_n = ""
+                
                 sql_n = f"""
                     WITH LW AS (
                         SELECT cod_animal, peso, ROW_NUMBER() OVER (PARTITION BY cod_animal ORDER BY data DESC) as rn
                         FROM cad_pesagem_corte
+                    ),
+                    SaleInfo AS (
+                        SELECT cv.cod_animal, cv.data as dtv, cv.peso as peso_venda, tc.descricao as cliente
+                        FROM cad_venda cv JOIN Tab_criador tc ON cv.cod_criador = tc.cod_criador
+                    ),
+                    MorteInfo AS (
+                        SELECT cod_animal, data as dt_morte FROM cad_morte
+                    ),
+                    PesoMorto AS (
+                        SELECT Cod_Animal, Data, (Peso_BDQ + Peso_BEQ) as peso_morto FROM Cad_peso_morto
                     )
-                    SELECT cf.id_animal, cf.dt_nascimento, lw.peso as pf, DATEDIFF(day, cf.dt_nascimento, GETDATE()) as td
+                    SELECT cf.id_animal, cf.cod_animal, cf.dt_nascimento, cf.sexo,
+                           ISNULL(lw.peso, 40.0) as pf,
+                           DATEDIFF(day, cf.dt_nascimento, ISNULL(si.dtv, ISNULL(mi.dt_morte, GETDATE()))) as td,
+                           si.cliente as destino_cliente, si.dtv as dt_venda,
+                           mi.dt_morte,
+                           CASE 
+                               WHEN si.dtv IS NOT NULL THEN 'VENDIDO'
+                               WHEN mi.dt_morte IS NOT NULL THEN 'MORTO'
+                               ELSE 'ATIVO'
+                           END as status_animal,
+                           CASE 
+                               WHEN si.dtv IS NOT NULL THEN 'VENDIDO: ' + ISNULL(si.cliente, '')
+                               WHEN mi.dt_morte IS NOT NULL THEN 'MORTO: ' + CAST(FORMAT(mi.dt_morte, 'dd/MM/yyyy') AS VARCHAR)
+                               ELSE 'ATIVO'
+                           END as destino,
+                           pm.peso_morto,
+                           pvenda.peso as peso_vivo_abate
                     FROM cad_fichario cf
                     LEFT JOIN LW lw ON cf.cod_animal = lw.cod_animal AND lw.rn = 1
+                    LEFT JOIN SaleInfo si ON cf.cod_animal = si.cod_animal
+                    LEFT JOIN MorteInfo mi ON cf.cod_animal = mi.cod_animal
+                    LEFT JOIN PesoMorto pm ON cf.cod_animal = pm.Cod_Animal AND si.dtv = pm.Data
+                    LEFT JOIN cad_pesagem_corte pvenda ON cf.cod_animal = pvenda.cod_animal AND si.dtv = pvenda.data
                     WHERE cf.cod_fazenda IN ({farm_ids_str}) AND cf.origem = 'N'
                     AND cf.dt_nascimento >= DATEADD(month, -{periodo_meses}, GETDATE())
-                    AND cf.cod_categoria NOT IN (SELECT cod_categoria FROM Tab_categoria WHERE morto = 'S' OR vendido = 'S')
+                    {sexo_filter} {status_filter_n}
                 """
                 df_n = pd.read_sql(sql_n, conn)
                 if not df_n.empty:
                     df_n['mes_nasc'] = df_n['dt_nascimento'].dt.strftime('%m/%Y')
                     df_n['gmd'] = (df_n['pf'] - 40.0) / df_n['td'].replace(0, 1)
+                    df_n['sexo_label'] = df_n['sexo'].map({'M': 'Macho', 'F': 'Fêmea'})
+                    df_n['rendimento'] = df_n.apply(
+                        lambda r: (r['peso_morto'] / r['peso_vivo_abate'] * 100) 
+                        if pd.notna(r['peso_morto']) and pd.notna(r['peso_vivo_abate']) and r['peso_vivo_abate'] > 0 
+                        else None, axis=1
+                    )
                     
-                    fig_line = px.line(
-                        df_n.groupby('mes_nasc')['gmd'].mean().reset_index(), 
-                        x='mes_nasc', 
-                        y='gmd', 
-                        markers=True, 
-                        title="Eficiência (GMD) por Ciclo"
+                    # Color metric
+                    metric_col1, metric_col2 = st.columns([3, 1])
+                    with metric_col2:
+                        color_metric_n = st.selectbox("Métrica de cor:", ["GMD", "Peso Vivo", "Permanência"], key="nasc_color_metric")
+                    color_map_n = {"GMD": "gmd", "Peso Vivo": "pf", "Permanência": "td"}
+                    color_field_n = color_map_n[color_metric_n]
+                    
+                    # Sunburst
+                    fig_sun_n = px.sunburst(
+                        df_n, path=['mes_nasc', 'sexo_label', 'status_animal'],
+                        values='pf', color=color_field_n,
+                        color_continuous_scale=custom_scale,
+                        title=f"Hierarquia: Mês > Sexo > Status (Cor = {color_metric_n})"
                     )
-                    fig_line.update_traces(line_color='#064e3b', marker=dict(size=10, color='#be185d'))
-                    fig_line.update_layout(
-                        paper_bgcolor='rgba(0,0,0,0)',
-                        plot_bgcolor='rgba(0,0,0,0)',
-                        font=dict(family="Outfit")
+                    fig_sun_n.update_layout(paper_bgcolor='rgba(0,0,0,0)', font=dict(family="Outfit"), title_font=dict(size=20, color="#064e3b"))
+                    st.plotly_chart(fig_sun_n, use_container_width=True)
+                    
+                    st.markdown("---")
+                    st.markdown("""
+                        <div class="section-header">
+                            <div class="icon-box icon-amber">
+                                <span class="mat-icon">account_tree</span>
+                            </div>
+                            <div>
+                                <div class="section-title">Árvore de Decomposição</div>
+                                <div class="section-subtitle">Nascimento → Mês → Sexo → Destino</div>
+                            </div>
+                        </div>
+                    """, unsafe_allow_html=True)
+                    
+                    df_tree_n = df_n.copy()
+                    df_tree_n['Mês'] = df_tree_n['mes_nasc']
+                    df_tree_n['Sexo'] = df_tree_n['sexo_label']
+                    df_tree_n['Destino'] = df_tree_n['destino']
+                    df_tree_n['Qtd'] = 1
+                    
+                    fig_tree_n = px.icicle(
+                        df_tree_n,
+                        path=[px.Constant("Total Nascimentos"), 'Mês', 'Sexo', 'Destino'],
+                        values='Qtd', color=color_field_n,
+                        color_continuous_scale=custom_scale,
+                        title=f"Decomposição (Cor = {color_metric_n})"
                     )
-                    st.plotly_chart(fig_line, use_container_width=True)
-                    st.dataframe(df_n.groupby('mes_nasc').agg({'id_animal':'count', 'pf':'mean', 'gmd':'mean'}).reset_index(), use_container_width=True)
+                    fig_tree_n.update_traces(textinfo="label+value")
+                    fig_tree_n.update_layout(paper_bgcolor='rgba(0,0,0,0)', font=dict(family="Outfit"))
+                    st.plotly_chart(fig_tree_n, use_container_width=True)
+                    
+                    # Grid
+                    st.markdown("""
+                        <div class="section-header">
+                            <div class="icon-box icon-green">
+                                <span class="mat-icon">table_chart</span>
+                            </div>
+                            <div>
+                                <div class="section-title">Detalhamento da Performance</div>
+                                <div class="section-subtitle">Selecione o nível de agrupamento</div>
+                            </div>
+                        </div>
+                    """, unsafe_allow_html=True)
+                    
+                    nivel_n = st.radio(
+                        "Nível de agrupamento:",
+                        ["Por Mês", "Por Mês e Sexo", "Por Mês, Sexo e Destino"],
+                        horizontal=True, key="nasc_nivel_grid"
+                    )
+                    
+                    agg_n = {'id_animal': 'count', 'pf': 'mean', 'td': 'mean', 'gmd': 'mean', 'peso_morto': 'mean', 'rendimento': 'mean'}
+                    if nivel_n == "Por Mês":
+                        res_n = df_n.groupby('mes_nasc').agg(agg_n).reset_index()
+                        res_n.columns = ['Mês Nasc.', 'Qtd', 'Peso Atual (kg)', 'Permanência (Dias)', 'GMD (kg/dia)', 'Peso Morto (kg)', 'Rendimento (%)']
+                    elif nivel_n == "Por Mês e Sexo":
+                        res_n = df_n.groupby(['mes_nasc', 'sexo_label']).agg(agg_n).reset_index()
+                        res_n.columns = ['Mês Nasc.', 'Sexo', 'Qtd', 'Peso Atual (kg)', 'Permanência (Dias)', 'GMD (kg/dia)', 'Peso Morto (kg)', 'Rendimento (%)']
+                    else:
+                        res_n = df_n.groupby(['mes_nasc', 'sexo_label', 'status_animal']).agg(agg_n).reset_index()
+                        res_n.columns = ['Mês Nasc.', 'Sexo', 'Status', 'Qtd', 'Peso Atual (kg)', 'Permanência (Dias)', 'GMD (kg/dia)', 'Peso Morto (kg)', 'Rendimento (%)']
+                    
+                    fmt_n = {'Peso Atual (kg)': '{:.1f}', 'Permanência (Dias)': '{:.0f}', 'GMD (kg/dia)': '{:.3f}', 'Peso Morto (kg)': '{:.1f}', 'Rendimento (%)': '{:.1f}%'}
+                    res_n = format_grid_df(res_n, fmt_n)
+                    st.dataframe(res_n, use_container_width=True, hide_index=True)
+                else:
+                    st.info("Nenhum dado encontrado para os filtros selecionados.")
 
         elif page == "📋 Ficha de Animais":
             st.markdown("""

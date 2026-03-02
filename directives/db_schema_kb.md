@@ -116,6 +116,19 @@ Records all changes in the animal's status or location over time.
 - `GPM`: Monthly Weight Gain (Ganho por Mês).
 - `GPD`: Daily Weight Gain (Ganho por Dia).
 
+### `Cad_peso_morto` (Carcass Weight records)
+- `Cod_Animal`: Foreign key to `cad_fichario`.
+- `Data`: Date of slaughter (matches `cad_venda.Data` for sold animals).
+- `Peso_BDQ`: Hot carcass weight — left side (Peso Banda Direita Quente) in Kg.
+- `Peso_BEQ`: Hot carcass weight — right side (Peso Banda Esquerda Quente) in Kg.
+- `Peso_BDF`: Cold carcass weight — left side in Kg.
+- `Peso_BEF`: Cold carcass weight — right side in Kg.
+- `Cod_Conformacao`: Conformation code.
+- `Cod_Cobertura`: Fat cover code.
+- `DIP`: Days in plant (Dias no Frigorífico).
+- **Derived**: `Peso Morto = Peso_BDQ + Peso_BEQ`
+- **Derived**: `Rendimento de Carcaça (%) = Peso Morto / cad_pesagem_corte.Peso * 100` (matched by `cod_animal` and `data`)
+
 ---
 
 ### Accessory Tables (Master Data)
