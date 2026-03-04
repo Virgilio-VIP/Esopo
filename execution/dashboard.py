@@ -1341,30 +1341,31 @@ def main():
                                si.cliente as destino_cliente,
                                si.dtv as dt_venda,
                                mi.dt_morte,
-                               CASE 
-                                   WHEN si.dtv IS NOT NULL THEN 'VENDIDO: ' + CAST(FORMAT(si.dtv, 'dd/MM/yyyy') AS VARCHAR) + ' - ' + si.cliente
-                                   WHEN mi.dt_morte IS NOT NULL THEN 'MORTO: ' + CAST(FORMAT(mi.dt_morte, 'dd/MM/yyyy') AS VARCHAR)
-                                   ELSE 'ATIVO'
-                               END as destino,
-                               pm.peso_morto,
-                               pvenda.peso as peso_vivo_abate
-                        FROM cad_fichario cf
-                        JOIN cad_compra cc ON cf.cod_animal = cc.cod_animal
-                        JOIN Tab_criador tc ON cc.cod_criador = tc.cod_criador
-                        LEFT JOIN FW fw ON cf.cod_animal = fw.cod_animal AND fw.rn = 1
-                        LEFT JOIN LW lw ON cf.cod_animal = lw.cod_animal AND lw.rn = 1
-                        LEFT JOIN SaleInfo si ON cf.cod_animal = si.cod_animal
-                        LEFT JOIN MorteInfo mi ON cf.cod_animal = mi.cod_animal
-                        LEFT JOIN PesoMorto pm ON cf.cod_animal = pm.Cod_Animal AND si.dtv = pm.Data
-                        LEFT JOIN cad_pesagem_corte pvenda ON cf.cod_animal = pvenda.cod_animal AND si.dtv = pvenda.data
-                        WHERE cf.cod_fazenda IN ({farm_ids_str}) AND cc.cod_criador IN ({s_str})
-                        AND cc.data >= DATEADD(month, -{periodo_meses}, GETDATE())
-                        {status_filter}
+                                CASE 
+                                    WHEN si.dtv IS NOT NULL THEN 'VENDIDO: ' + CAST(FORMAT(si.dtv, 'dd/MM/yyyy') AS VARCHAR) + ' - ' + si.cliente
+                                    WHEN mi.dt_morte IS NOT NULL THEN 'MORTO: ' + CAST(FORMAT(mi.dt_morte, 'dd/MM/yyyy') AS VARCHAR)
+                                    ELSE 'ATIVO'
+                                END as destino,
+                                pm.peso_morto,
+                                pvenda.peso as peso_vivo_abate,
+                                (lw.peso - fw.peso) / NULLIF(DATEDIFF(day, fw.data, lw.data), 0) as gmd_sql
+                         FROM cad_fichario cf
+                         JOIN cad_compra cc ON cf.cod_animal = cc.cod_animal
+                         JOIN Tab_criador tc ON cc.cod_criador = tc.cod_criador
+                         LEFT JOIN FW fw ON cf.cod_animal = fw.cod_animal AND fw.rn = 1
+                         LEFT JOIN LW lw ON cf.cod_animal = lw.cod_animal AND lw.rn = 1
+                         LEFT JOIN SaleInfo si ON cf.cod_animal = si.cod_animal
+                         LEFT JOIN MorteInfo mi ON cf.cod_animal = mi.cod_animal
+                         LEFT JOIN PesoMorto pm ON cf.cod_animal = pm.Cod_Animal AND si.dtv = pm.Data
+                         LEFT JOIN cad_pesagem_corte pvenda ON cf.cod_animal = pvenda.cod_animal AND si.dtv = pvenda.data
+                         WHERE cf.cod_fazenda IN ({farm_ids_str}) AND cc.cod_criador IN ({s_str})
+                         AND cc.data >= DATEADD(month, -{periodo_meses}, GETDATE())
+                         {status_filter}
                     """
                     df_c = pd.read_sql(sql_c, conn)
                     if not df_c.empty:
                         df_c['gt'] = (df_c['pf'] - df_c['pi']).fillna(0)
-                        df_c['gmd'] = df_c['gt'] / df_c['td'].replace(0, 1)
+                        df_c['gmd'] = df_c['gmd_sql'].astype(float)
                         df_c['rendimento'] = df_c.apply(
                             lambda r: (r['peso_morto'] / r['peso_vivo_abate'] * 100) 
                             if pd.notna(r['peso_morto']) and pd.notna(r['peso_vivo_abate']) and r['peso_vivo_abate'] > 0 
@@ -1490,8 +1491,12 @@ def main():
                     status_filter_n = ""
                 
                 sql_n = f"""
-                    WITH LW AS (
-                        SELECT cod_animal, peso, ROW_NUMBER() OVER (PARTITION BY cod_animal ORDER BY data DESC) as rn
+                    WITH FW AS (
+                        SELECT cod_animal, peso, data, ROW_NUMBER() OVER (PARTITION BY cod_animal ORDER BY data ASC) as rn
+                        FROM cad_pesagem_corte
+                    ),
+                    LW AS (
+                        SELECT cod_animal, peso, data, ROW_NUMBER() OVER (PARTITION BY cod_animal ORDER BY data DESC) as rn
                         FROM cad_pesagem_corte
                     ),
                     SaleInfo AS (
@@ -1520,8 +1525,10 @@ def main():
                                ELSE 'ATIVO'
                            END as destino,
                            pm.peso_morto,
-                           pvenda.peso as peso_vivo_abate
+                           pvenda.peso as peso_vivo_abate,
+                           (lw.peso - fw.peso) / NULLIF(DATEDIFF(day, fw.data, lw.data), 0) as gmd
                     FROM cad_fichario cf
+                    LEFT JOIN FW fw ON cf.cod_animal = fw.cod_animal AND fw.rn = 1
                     LEFT JOIN LW lw ON cf.cod_animal = lw.cod_animal AND lw.rn = 1
                     LEFT JOIN SaleInfo si ON cf.cod_animal = si.cod_animal
                     LEFT JOIN MorteInfo mi ON cf.cod_animal = mi.cod_animal
@@ -1534,7 +1541,7 @@ def main():
                 df_n = pd.read_sql(sql_n, conn)
                 if not df_n.empty:
                     df_n['mes_nasc'] = df_n['dt_nascimento'].dt.strftime('%m/%Y')
-                    df_n['gmd'] = (df_n['pf'] - 40.0) / df_n['td'].replace(0, 1)
+                    df_n['gmd'] = df_n['gmd'].astype(float)
                     df_n['sexo_label'] = df_n['sexo'].map({'M': 'Macho', 'F': 'Fêmea'})
                     df_n['rendimento'] = df_n.apply(
                         lambda r: (r['peso_morto'] / r['peso_vivo_abate'] * 100) 
@@ -1632,7 +1639,11 @@ def main():
                 # Slaughters are defined by animals in CPM with Venda matching date/buyer/dt_inclusao
                 sql_abates = f"""
                     WITH FW AS (
-                        SELECT cod_animal, peso, ROW_NUMBER() OVER (PARTITION BY cod_animal ORDER BY data ASC) as rn
+                        SELECT cod_animal, peso, data, ROW_NUMBER() OVER (PARTITION BY cod_animal ORDER BY data ASC) as rn
+                        FROM cad_pesagem_corte
+                    ),
+                    LW AS (
+                        SELECT cod_animal, peso, data, ROW_NUMBER() OVER (PARTITION BY cod_animal ORDER BY data DESC) as rn
                         FROM cad_pesagem_corte
                     )
                     SELECT 
@@ -1645,7 +1656,7 @@ def main():
                         m.DIP,
                         DATEDIFF(day, f.dt_nascimento, m.Data) as idade_dias,
                         DATEDIFF(day, ISNULL(c.data, f.dt_nascimento), m.Data) as permanencia,
-                        (pc.peso - CASE WHEN f.origem = 'N' THEN 40.0 ELSE COALESCE(NULLIF(c.peso, 0), fw.peso) END) / NULLIF(DATEDIFF(day, ISNULL(c.data, f.dt_nascimento), m.Data), 0) as gmd
+                        (lw.peso - fw.peso) / NULLIF(DATEDIFF(day, fw.data, lw.data), 0) as gmd
                     FROM Cad_peso_morto m
                     JOIN cad_venda v ON m.Cod_Animal = v.cod_animal AND m.Data = v.Data
                     JOIN Tab_criador cr ON v.cod_criador = cr.cod_criador
@@ -1654,6 +1665,7 @@ def main():
                     LEFT JOIN cad_pesagem_corte pc ON m.Cod_Animal = pc.cod_animal AND m.Data = pc.data
                     LEFT JOIN cad_compra c ON m.Cod_Animal = c.cod_animal
                     LEFT JOIN FW fw ON f.Cod_Animal = fw.cod_animal AND fw.rn = 1
+                    LEFT JOIN LW lw ON f.Cod_Animal = lw.cod_animal AND lw.rn = 1
                     WHERE f.cod_fazenda IN ({farm_ids_str})
                     AND m.Data >= DATEADD(month, -{periodo_meses}, GETDATE())
                 """
@@ -1750,6 +1762,34 @@ def main():
                                 }
                                 res_dip_disp = format_grid_df(res_dip, fmt_dip)
                                 st.dataframe(res_dip_disp, use_container_width=True, hide_index=True)
+                                
+                                st.write("---")
+                                st.write("**Distribuição do Peso Morto:**")
+                                
+                                mean_pm = df_sel['peso_morto'].mean()
+                                min_pm = df_sel['peso_morto'].min()
+                                max_pm = df_sel['peso_morto'].max()
+                                std_pm = df_sel['peso_morto'].std()
+                                if pd.isna(std_pm): std_pm = 0.0
+                                cv_pm = (std_pm / mean_pm * 100) if mean_pm > 0 else 0
+                                
+                                hc1, hc2, hc3 = st.columns(3)
+                                hc1.metric("Média", f"{mean_pm:.1f} kg")
+                                hc2.metric("Mín", f"{min_pm:.1f} kg")
+                                hc3.metric("Máx", f"{max_pm:.1f} kg")
+                                
+                                hc4, hc5, hc6 = st.columns(3)
+                                hc4.metric("DP", f"{std_pm:.1f} kg")
+                                hc5.metric("CV", f"{cv_pm:.1f}%")
+                                
+                                fig_hist = px.histogram(
+                                    df_sel, x="peso_morto", nbins=10,
+                                    labels={"peso_morto": "Peso Morto (kg)"},
+                                    color_discrete_sequence=['#64748b']
+                                )
+                                fig_hist.add_vline(x=mean_pm, line_dash="dash", line_color="#be185d", annotation_text="Média")
+                                fig_hist.update_layout(margin=dict(l=20, r=20, t=20, b=20), template="plotly_white", yaxis_title="Frequência")
+                                st.plotly_chart(fig_hist, use_container_width=True)
                                 
                             with det_col2:
                                 st.write("**Gráfico de Regressão:**")
