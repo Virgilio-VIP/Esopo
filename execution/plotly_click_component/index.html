@@ -1,0 +1,82 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="utf-8">
+    <script src="https://cdn.plot.ly/plotly-2.35.2.min.js"></script>
+    <style>
+        body { margin: 0; padding: 0; font-family: 'Outfit', sans-serif; }
+        #chart { width: 100%; }
+    </style>
+</head>
+<body>
+    <div id="chart"></div>
+    <script>
+        // Streamlit component communication
+        function sendMessageToStreamlitClient(type, data) {
+            const outData = Object.assign({ isStreamlitMessage: true, type: type }, data);
+            window.parent.postMessage(outData, "*");
+        }
+
+        function init() {
+            sendMessageToStreamlitClient("streamlit:componentReady", { apiVersion: 1 });
+        }
+
+        function setFrameHeight(height) {
+            sendMessageToStreamlitClient("streamlit:setFrameHeight", { height: height });
+        }
+
+        function setComponentValue(value) {
+            sendMessageToStreamlitClient("streamlit:setComponentValue", { value: value });
+        }
+
+        // Listen for render events from Streamlit
+        window.addEventListener("message", function(event) {
+            if (event.data.type !== "streamlit:render") return;
+            onRender(event.data);
+        });
+
+        let currentChart = null;
+
+        function onRender(renderData) {
+            const args = renderData.args;
+            const figJSON = JSON.parse(args.fig_json);
+            const chartHeight = args.height || 600;
+
+            const chartDiv = document.getElementById("chart");
+            chartDiv.style.height = chartHeight + "px";
+
+            Plotly.react(chartDiv, figJSON.data, figJSON.layout, { responsive: true }).then(function() {
+                // Capture click events on icicle/treemap/sunburst nodes
+                chartDiv.on("plotly_click", function(eventData) {
+                    if (!eventData || !eventData.points || eventData.points.length === 0) return;
+                    const point = eventData.points[0];
+                    setComponentValue({
+                        id: point.id || "",
+                        label: point.label || "",
+                        parent: point.parent || "",
+                        pointNumber: point.pointNumber,
+                        value: point.value
+                    });
+                });
+
+                // Also capture sunburst click (zoom) events
+                chartDiv.on("plotly_sunburstclick", function(eventData) {
+                    if (!eventData || !eventData.points || eventData.points.length === 0) return;
+                    const point = eventData.points[0];
+                    setComponentValue({
+                        id: point.id || "",
+                        label: point.label || "",
+                        parent: point.parent || "",
+                        pointNumber: point.pointNumber,
+                        value: point.value
+                    });
+                });
+
+                setFrameHeight(chartHeight + 10);
+            });
+        }
+
+        init();
+    </script>
+</body>
+</html>

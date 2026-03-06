@@ -7,6 +7,7 @@ import base64
 import plotly.express as px
 import plotly.graph_objects as go
 from dotenv import load_dotenv
+import json
 
 # Page config
 st.set_page_config(
@@ -756,13 +757,108 @@ def format_grid_df(df, fmt_dict):
     """Round numeric columns according to fmt_dict and replace NaN with '—'."""
     for col, spec in fmt_dict.items():
         if col in df.columns:
-            # Extract decimal places from format spec like '{:.1f}', '{:.3f}', '{:.0f}', '{:.1f}%'
             try:
                 decimals = int(spec.split('.')[1][0])
-                df[col] = df[col].apply(lambda x: round(float(x), decimals) if pd.notna(x) and x != '—' else x)
+                df[col] = df[col].apply(
+                    lambda x: round(float(x), decimals)
+                    if pd.notna(x) and not isinstance(x, str)
+                    else x
+                )
             except (ValueError, IndexError, TypeError):
                 pass
     return df.fillna('—')
+
+def parse_icicle_selection(event_data, hierarchy_cols):
+    """Parse on_select event from an icicle chart.
+    
+    Args:
+        event_data: Return value from st.plotly_chart(on_select="rerun").
+        hierarchy_cols: Column names in the icicle path (excluding root constant).
+    Returns:
+        dict of {col_name: value} for each hierarchy level down to the clicked node.
+    """
+    try:
+        points = event_data.selection.points if event_data else []
+    except (AttributeError, TypeError):
+        return {}
+    if not points:
+        return {}
+    point = points[0]
+    point_id = point.get("id", "") if isinstance(point, dict) else ""
+    if not point_id:
+        return {}
+    parts = point_id.split("/")
+    if len(parts) <= 1:
+        return {}  # Root node clicked — no filter
+    filters = {}
+    for i, col in enumerate(hierarchy_cols):
+        idx = i + 1  # skip root
+        if idx < len(parts):
+            filters[col] = parts[idx]
+    return filters
+
+# --- Custom Plotly click-capture component ---
+_plotly_click_component = components.declare_component(
+    "plotly_click",
+    path=os.path.join(os.path.dirname(os.path.abspath(__file__)), "plotly_click_component")
+)
+
+def plotly_click_chart(fig, key, height=600):
+    """Render a Plotly chart that captures click events on icicle/treemap nodes.
+    Returns the clicked node data dict or None.
+    """
+    fig_json = fig.to_json()
+    result = _plotly_click_component(fig_json=fig_json, height=height, key=key, default=None)
+    return result
+
+def parse_click_filter(click_data, hierarchy_cols):
+    """Parse click data from plotly_click_chart into a filter dict.
+    
+    Args:
+        click_data: Return from plotly_click_chart (dict with 'id' key or None).
+        hierarchy_cols: Column names matching the icicle path (excluding root).
+    Returns:
+        dict of {col_name: value} for each hierarchy level down to the clicked node.
+    """
+    if not click_data or not isinstance(click_data, dict):
+        return {}
+    node_id = click_data.get('id', '')
+    if not node_id:
+        return {}
+    parts = node_id.split('/')
+    if len(parts) <= 1:
+        return {}  # Root clicked
+    filters = {}
+    for i, col in enumerate(hierarchy_cols):
+        idx = i + 1
+        if idx < len(parts):
+            filters[col] = parts[idx]
+    return filters
+
+def append_total_row(df, fmt_dict, qtd_col='Qtd'):
+    """Append a formatted TOTAL row: sum for qty, mean for numeric cols.
+    
+    Must be called BEFORE format_grid_df so it operates on raw numeric data.
+    """
+    total = {}
+    for col in df.columns:
+        if col == qtd_col:
+            total[col] = int(pd.to_numeric(df[col], errors='coerce').sum())
+        elif pd.api.types.is_numeric_dtype(df[col]):
+            val = df[col].mean()
+            # Apply column format mask if available
+            spec = fmt_dict.get(col, '')
+            if spec and pd.notna(val):
+                try:
+                    total[col] = float(spec.replace('%', '').strip('{}').format(val))
+                except (ValueError, TypeError):
+                    total[col] = val
+            else:
+                total[col] = val
+        else:
+            total[col] = 'TOTAL' if col == df.columns[0] else ''
+    total_df = pd.DataFrame([total])
+    return pd.concat([df, total_df], ignore_index=True)
 
 def get_base64_of_bin_file(bin_file):
     if os.path.exists(bin_file):
@@ -775,6 +871,9 @@ def main():
     # --- Initialize page state ---
     if "current_page" not in st.session_state:
         st.session_state.current_page = "resumo"
+    for _tk in ["vendas_tree_key", "compras_tree_key", "nasc_tree_key"]:
+        if _tk not in st.session_state:
+            st.session_state[_tk] = 0
     
     # Navigation definitions
     nav_items = [
@@ -1127,11 +1226,11 @@ def main():
                             WHERE cv.cod_criador IN ({b_str}) AND cv.data >= DATEADD(month, -{periodo_meses}, GETDATE())
                         ),
                         FW AS (
-                            SELECT cod_animal, peso, ROW_NUMBER() OVER (PARTITION BY cod_animal ORDER BY data ASC) as rn
+                            SELECT cod_animal, peso, data, ROW_NUMBER() OVER (PARTITION BY cod_animal ORDER BY data ASC) as rn
                             FROM cad_pesagem_corte
                         ),
                         LW AS (
-                            SELECT cod_animal, peso, ROW_NUMBER() OVER (PARTITION BY cod_animal ORDER BY data DESC) as rn
+                            SELECT cod_animal, peso, data, ROW_NUMBER() OVER (PARTITION BY cod_animal ORDER BY data DESC) as rn
                             FROM cad_pesagem_corte
                         ),
                         PesoMorto AS (
@@ -1150,7 +1249,9 @@ def main():
                                CASE WHEN cf.origem = 'N' THEN 40.0 ELSE COALESCE(NULLIF(e.pe, 0), fw.peso) END as pi,
                                e.dte as data_compra_raw, e.forn as fornecedor_raw,
                                pm.peso_morto,
-                               pvenda.peso as peso_vivo_abate
+                               pvenda.peso as peso_vivo_abate,
+                               (lw.peso - fw.peso) / NULLIF(DATEDIFF(day, fw.data, lw.data), 0) as gmd_sql,
+                               DATEDIFF(day, fw.data, lw.data) as interv_pesagens
                         FROM cad_fichario cf
                         JOIN Sale s ON cf.cod_animal = s.cod_animal
                         LEFT JOIN Entry e ON cf.cod_animal = e.cod_animal
@@ -1163,7 +1264,7 @@ def main():
                     df = pd.read_sql(sql, conn)
                     if not df.empty:
                         df['gt'] = df['pv'] - df['pi']
-                        df['gmd'] = df['gt'] / df['td'].replace(0, 1)
+                        df['gmd'] = df['gmd_sql'].astype(float)
                         df['rendimento'] = df.apply(
                             lambda r: (r['peso_morto'] / r['peso_vivo_abate'] * 100) 
                             if pd.notna(r['peso_morto']) and pd.notna(r['peso_vivo_abate']) and r['peso_vivo_abate'] > 0 
@@ -1210,9 +1311,9 @@ def main():
                         """, unsafe_allow_html=True)
                         
                         df_tree = df.copy()
-                        df_tree['Venda'] = df_tree['dtv'].dt.strftime('%d/%m/%Y')
+                        df_tree['Venda'] = df_tree['dtv'].dt.strftime('%d-%m-%Y')
                         df_tree['Cliente'] = df_tree['comp']
-                        df_tree['Compra'] = pd.to_datetime(df_tree['data_compra_raw']).dt.strftime('%d/%m/%Y').fillna('NASCIMENTO')
+                        df_tree['Compra'] = pd.to_datetime(df_tree['data_compra_raw']).dt.strftime('%d-%m-%Y').fillna('NASCIMENTO')
                         df_tree['Fornecedor'] = df_tree['fornecedor_raw'].fillna('ORIGEM INTERNA')
                         df_tree['Qtd'] = 1
                         
@@ -1229,9 +1330,12 @@ def main():
                             paper_bgcolor='rgba(0,0,0,0)',
                             font=dict(family="Outfit")
                         )
-                        st.plotly_chart(fig_tree, use_container_width=True)
+                        click_v = plotly_click_chart(fig_tree, key="vendas_icicle_click", height=550)
                         
-                        # --- Performance Grid - Sensitive to decomposition level ---
+                        # Parse click → grid filter
+                        vf = parse_click_filter(click_v, ['Cliente', 'Venda', 'Fornecedor', 'Compra'])
+                        
+                        # --- Performance Grid ---
                         st.markdown("""
                             <div class="section-header">
                                 <div class="icon-box icon-green">
@@ -1239,10 +1343,24 @@ def main():
                                 </div>
                                 <div>
                                     <div class="section-title">Detalhamento da Performance</div>
-                                    <div class="section-subtitle">Selecione o nível de agrupamento</div>
+                                    <div class="section-subtitle">Clique na árvore acima para filtrar o detalhamento</div>
                                 </div>
                             </div>
                         """, unsafe_allow_html=True)
+                        
+                        # Apply click filter to grid data
+                        df_v_grid = df.copy()
+                        if vf:
+                            df_v_grid['_cliente'] = df_v_grid['comp']
+                            df_v_grid['_venda'] = df_v_grid['dtv'].dt.strftime('%d-%m-%Y')
+                            df_v_grid['_fornecedor'] = df_v_grid['fornecedor_raw'].fillna('ORIGEM INTERNA')
+                            df_v_grid['_compra'] = pd.to_datetime(df_v_grid['data_compra_raw']).dt.strftime('%d-%m-%Y').fillna('NASCIMENTO')
+                            _vmap = {'Cliente': '_cliente', 'Venda': '_venda', 'Fornecedor': '_fornecedor', 'Compra': '_compra'}
+                            for _k, _val in vf.items():
+                                _c = _vmap.get(_k)
+                                if _c:
+                                    df_v_grid = df_v_grid[df_v_grid[_c] == _val]
+                            st.info(f"🔍 Filtro ativo: {' → '.join(vf.values())}  *(clique no nível raiz para limpar)*")
                         
                         nivel = st.radio(
                             "Nível de agrupamento:",
@@ -1252,23 +1370,25 @@ def main():
                         )
                         
                         if nivel == "Por Fornecedor (Nível 4)":
-                            df['fornecedor_agg'] = df['fornecedor_raw'].fillna('ORIGEM INTERNA')
-                            agg_cols = {'id_animal': 'count', 'pv': 'mean', 'td': 'mean', 'gt': 'mean', 'gmd': 'mean', 'peso_morto': 'mean', 'rendimento': 'mean'}
-                            res = df.groupby(['comp', 'fornecedor_agg']).agg(agg_cols).reset_index()
-                            res.columns = ['Comprador', 'Fornecedor', 'Qtd', 'Peso Venda (kg)', 'Permanência (Dias)', 'Ganho Total (kg)', 'GMD (kg/dia)', 'Peso Morto (kg)', 'Rendimento (%)']
+                            df_v_grid['fornecedor_agg'] = df_v_grid['fornecedor_raw'].fillna('ORIGEM INTERNA')
+                            agg_cols = {'id_animal': 'count', 'pv': 'mean', 'td': 'mean', 'interv_pesagens': 'mean', 'gt': 'mean', 'gmd': 'mean', 'peso_morto': 'mean', 'rendimento': 'mean'}
+                            res = df_v_grid.groupby(['comp', 'fornecedor_agg']).agg(agg_cols).reset_index()
+                            res.columns = ['Comprador', 'Fornecedor', 'Qtd', 'Peso Venda (kg)', 'Permanência (Dias)', 'Intervalo Pesagens (Dias)', 'Ganho Total (kg)', 'GMD (kg/dia)', 'Peso Morto (kg)', 'Rendimento (%)']
                         else:
-                            agg_cols = {'id_animal': 'count', 'pv': 'mean', 'td': 'mean', 'gt': 'mean', 'gmd': 'mean', 'peso_morto': 'mean', 'rendimento': 'mean'}
-                            res = df.groupby(['comp', 'og']).agg(agg_cols).reset_index()
-                            res.columns = ['Comprador', 'Origem (Lote/Mês)', 'Qtd', 'Peso Venda (kg)', 'Permanência (Dias)', 'Ganho Total (kg)', 'GMD (kg/dia)', 'Peso Morto (kg)', 'Rendimento (%)']
+                            agg_cols = {'id_animal': 'count', 'pv': 'mean', 'td': 'mean', 'interv_pesagens': 'mean', 'gt': 'mean', 'gmd': 'mean', 'peso_morto': 'mean', 'rendimento': 'mean'}
+                            res = df_v_grid.groupby(['comp', 'og']).agg(agg_cols).reset_index()
+                            res.columns = ['Comprador', 'Origem (Lote/Mês)', 'Qtd', 'Peso Venda (kg)', 'Permanência (Dias)', 'Intervalo Pesagens (Dias)', 'Ganho Total (kg)', 'GMD (kg/dia)', 'Peso Morto (kg)', 'Rendimento (%)']
                         
                         fmt = {
                             'Peso Venda (kg)': '{:.1f}',
                             'Permanência (Dias)': '{:.0f}',
+                            'Intervalo Pesagens (Dias)': '{:.0f}',
                             'Ganho Total (kg)': '{:.1f}',
                             'GMD (kg/dia)': '{:.3f}',
                             'Peso Morto (kg)': '{:.1f}',
                             'Rendimento (%)': '{:.1f}%'
                         }
+                        res = append_total_row(res, fmt)
                         res = format_grid_df(res, fmt)
                         st.dataframe(res, use_container_width=True, hide_index=True)
 
@@ -1315,11 +1435,11 @@ def main():
                     
                     sql_c = f"""
                         WITH FW AS (
-                            SELECT cod_animal, peso, ROW_NUMBER() OVER (PARTITION BY cod_animal ORDER BY data ASC) as rn
+                            SELECT cod_animal, peso, data, ROW_NUMBER() OVER (PARTITION BY cod_animal ORDER BY data ASC) as rn
                             FROM cad_pesagem_corte
                         ),
                         LW AS (
-                            SELECT cod_animal, peso, ROW_NUMBER() OVER (PARTITION BY cod_animal ORDER BY data DESC) as rn
+                            SELECT cod_animal, peso, data, ROW_NUMBER() OVER (PARTITION BY cod_animal ORDER BY data DESC) as rn
                             FROM cad_pesagem_corte
                         ),
                         SaleInfo AS (
@@ -1348,7 +1468,8 @@ def main():
                                 END as destino,
                                 pm.peso_morto,
                                 pvenda.peso as peso_vivo_abate,
-                                (lw.peso - fw.peso) / NULLIF(DATEDIFF(day, fw.data, lw.data), 0) as gmd_sql
+                                (lw.peso - fw.peso) / NULLIF(DATEDIFF(day, fw.data, lw.data), 0) as gmd_sql,
+                                DATEDIFF(day, fw.data, lw.data) as interv_pesagens
                          FROM cad_fichario cf
                          JOIN cad_compra cc ON cf.cod_animal = cc.cod_animal
                          JOIN Tab_criador tc ON cc.cod_criador = tc.cod_criador
@@ -1404,7 +1525,7 @@ def main():
                         """, unsafe_allow_html=True)
                         
                         df_tree_c = df_c.copy()
-                        df_tree_c['Compra'] = df_tree_c['compra_fmt']
+                        df_tree_c['Compra'] = pd.to_datetime(df_tree_c['dt_compra']).dt.strftime('%d-%m-%Y')
                         df_tree_c['Destino'] = df_tree_c['destino']
                         df_tree_c['Qtd'] = 1
                         
@@ -1417,9 +1538,12 @@ def main():
                         )
                         fig_tree_c.update_traces(textinfo="label+value")
                         fig_tree_c.update_layout(paper_bgcolor='rgba(0,0,0,0)', font=dict(family="Outfit"))
-                        st.plotly_chart(fig_tree_c, use_container_width=True)
+                        click_c = plotly_click_chart(fig_tree_c, key="compras_icicle_click", height=550)
                         
-                        # Grid - level selector
+                        # Parse click → grid filter
+                        cf = parse_click_filter(click_c, ['fornecedor', 'Compra', 'Destino'])
+                        
+                        # Grid
                         st.markdown("""
                             <div class="section-header">
                                 <div class="icon-box icon-green">
@@ -1427,10 +1551,21 @@ def main():
                                 </div>
                                 <div>
                                     <div class="section-title">Detalhamento da Performance</div>
-                                    <div class="section-subtitle">Selecione o nível de agrupamento</div>
+                                    <div class="section-subtitle">Clique na árvore acima para filtrar o detalhamento</div>
                                 </div>
                             </div>
                         """, unsafe_allow_html=True)
+                        
+                        # Apply click filter
+                        df_c_grid = df_c.copy()
+                        if cf:
+                            df_c_grid['_compra_dt'] = pd.to_datetime(df_c_grid['dt_compra']).dt.strftime('%d-%m-%Y')
+                            _cmap = {'fornecedor': 'fornecedor', 'Compra': '_compra_dt', 'Destino': 'destino'}
+                            for _k, _val in cf.items():
+                                _c = _cmap.get(_k)
+                                if _c:
+                                    df_c_grid = df_c_grid[df_c_grid[_c] == _val]
+                            st.info(f"🔍 Filtro ativo: {' → '.join(cf.values())}  *(clique no nível raiz para limpar)*")
                         
                         nivel_c = st.radio(
                             "Nível de agrupamento:",
@@ -1438,16 +1573,17 @@ def main():
                             horizontal=True, key="compras_nivel_grid"
                         )
                         
-                        agg_c = {'id_animal': 'count', 'pi': 'mean', 'pf': 'mean', 'td': 'mean', 'gt': 'mean', 'gmd': 'mean', 'peso_morto': 'mean', 'rendimento': 'mean'}
+                        agg_c = {'id_animal': 'count', 'pi': 'mean', 'pf': 'mean', 'td': 'mean', 'interv_pesagens': 'mean', 'gt': 'mean', 'gmd': 'mean', 'peso_morto': 'mean', 'rendimento': 'mean'}
                         if nivel_c == "Por Fornecedor":
-                            res_c = df_c.groupby('fornecedor').agg(agg_c).reset_index()
-                            res_c.columns = ['Fornecedor', 'Qtd', 'Peso Compra (kg)', 'Peso Atual (kg)', 'Permanência (Dias)', 'Ganho Total (kg)', 'GMD (kg/dia)', 'Peso Morto (kg)', 'Rendimento (%)']
+                            res_c = df_c_grid.groupby('fornecedor').agg(agg_c).reset_index()
+                            res_c.columns = ['Fornecedor', 'Qtd', 'Peso Compra (kg)', 'Peso Atual (kg)', 'Permanência (Dias)', 'Intervalo Pesagens (Dias)', 'Ganho Total (kg)', 'GMD (kg/dia)', 'Peso Morto (kg)', 'Rendimento (%)']
                         else:
-                            df_c['dt_compra_fmt'] = pd.to_datetime(df_c['dt_compra']).dt.strftime('%d/%m/%Y')
-                            res_c = df_c.groupby(['fornecedor', 'dt_compra_fmt']).agg(agg_c).reset_index()
-                            res_c.columns = ['Fornecedor', 'Data Compra', 'Qtd', 'Peso Compra (kg)', 'Peso Atual (kg)', 'Permanência (Dias)', 'Ganho Total (kg)', 'GMD (kg/dia)', 'Peso Morto (kg)', 'Rendimento (%)']
+                            df_c_grid['dt_compra_fmt'] = pd.to_datetime(df_c_grid['dt_compra']).dt.strftime('%d/%m/%Y')
+                            res_c = df_c_grid.groupby(['fornecedor', 'dt_compra_fmt']).agg(agg_c).reset_index()
+                            res_c.columns = ['Fornecedor', 'Data Compra', 'Qtd', 'Peso Compra (kg)', 'Peso Atual (kg)', 'Permanência (Dias)', 'Intervalo Pesagens (Dias)', 'Ganho Total (kg)', 'GMD (kg/dia)', 'Peso Morto (kg)', 'Rendimento (%)']
                         
-                        fmt_c = {'Peso Compra (kg)': '{:.1f}', 'Peso Atual (kg)': '{:.1f}', 'Permanência (Dias)': '{:.0f}', 'Ganho Total (kg)': '{:.1f}', 'GMD (kg/dia)': '{:.3f}', 'Peso Morto (kg)': '{:.1f}', 'Rendimento (%)': '{:.1f}%'}
+                        fmt_c = {'Peso Compra (kg)': '{:.1f}', 'Peso Atual (kg)': '{:.1f}', 'Permanência (Dias)': '{:.0f}', 'Intervalo Pesagens (Dias)': '{:.0f}', 'Ganho Total (kg)': '{:.1f}', 'GMD (kg/dia)': '{:.3f}', 'Peso Morto (kg)': '{:.1f}', 'Rendimento (%)': '{:.1f}%'}
+                        res_c = append_total_row(res_c, fmt_c)
                         res_c = format_grid_df(res_c, fmt_c)
                         st.dataframe(res_c, use_container_width=True, hide_index=True)
                     else:
@@ -1526,7 +1662,8 @@ def main():
                            END as destino,
                            pm.peso_morto,
                            pvenda.peso as peso_vivo_abate,
-                           (lw.peso - fw.peso) / NULLIF(DATEDIFF(day, fw.data, lw.data), 0) as gmd
+                           (lw.peso - fw.peso) / NULLIF(DATEDIFF(day, fw.data, lw.data), 0) as gmd,
+                           DATEDIFF(day, fw.data, lw.data) as interv_pesagens
                     FROM cad_fichario cf
                     LEFT JOIN FW fw ON cf.cod_animal = fw.cod_animal AND fw.rn = 1
                     LEFT JOIN LW lw ON cf.cod_animal = lw.cod_animal AND lw.rn = 1
@@ -1580,9 +1717,9 @@ def main():
                     """, unsafe_allow_html=True)
                     
                     df_tree_n = df_n.copy()
-                    df_tree_n['Mês'] = df_tree_n['mes_nasc']
+                    df_tree_n['Mês'] = df_tree_n['dt_nascimento'].dt.strftime('%m-%Y')
                     df_tree_n['Sexo'] = df_tree_n['sexo_label']
-                    df_tree_n['Destino'] = df_tree_n['destino']
+                    df_tree_n['Destino'] = df_tree_n['destino'].str.replace('/', '-', regex=False)
                     df_tree_n['Qtd'] = 1
                     
                     fig_tree_n = px.icicle(
@@ -1594,7 +1731,10 @@ def main():
                     )
                     fig_tree_n.update_traces(textinfo="label+value")
                     fig_tree_n.update_layout(paper_bgcolor='rgba(0,0,0,0)', font=dict(family="Outfit"))
-                    st.plotly_chart(fig_tree_n, use_container_width=True)
+                    click_n = plotly_click_chart(fig_tree_n, key="nasc_icicle_click", height=550)
+                    
+                    # Parse click → grid filter
+                    nf = parse_click_filter(click_n, ['Mês', 'Sexo', 'Destino'])
                     
                     # Grid
                     st.markdown("""
@@ -1604,10 +1744,22 @@ def main():
                             </div>
                             <div>
                                 <div class="section-title">Detalhamento da Performance</div>
-                                <div class="section-subtitle">Selecione o nível de agrupamento</div>
+                                <div class="section-subtitle">Clique na árvore acima para filtrar o detalhamento</div>
                             </div>
                         </div>
                     """, unsafe_allow_html=True)
+                    
+                    # Apply click filter
+                    df_n_grid = df_n.copy()
+                    if nf:
+                        df_n_grid['_mes'] = df_n_grid['dt_nascimento'].dt.strftime('%m-%Y')
+                        df_n_grid['_destino'] = df_n_grid['destino'].str.replace('/', '-', regex=False)
+                        _nmap = {'Mês': '_mes', 'Sexo': 'sexo_label', 'Destino': '_destino'}
+                        for _k, _val in nf.items():
+                            _c = _nmap.get(_k)
+                            if _c:
+                                df_n_grid = df_n_grid[df_n_grid[_c] == _val]
+                        st.info(f"🔍 Filtro ativo: {' → '.join(nf.values())}  *(clique no nível raiz para limpar)*")
                     
                     nivel_n = st.radio(
                         "Nível de agrupamento:",
@@ -1615,18 +1767,19 @@ def main():
                         horizontal=True, key="nasc_nivel_grid"
                     )
                     
-                    agg_n = {'id_animal': 'count', 'pf': 'mean', 'td': 'mean', 'gmd': 'mean', 'peso_morto': 'mean', 'rendimento': 'mean'}
+                    agg_n = {'id_animal': 'count', 'pf': 'mean', 'td': 'mean', 'interv_pesagens': 'mean', 'gmd': 'mean', 'peso_morto': 'mean', 'rendimento': 'mean'}
                     if nivel_n == "Por Mês":
-                        res_n = df_n.groupby('mes_nasc').agg(agg_n).reset_index()
-                        res_n.columns = ['Mês Nasc.', 'Qtd', 'Peso Atual (kg)', 'Permanência (Dias)', 'GMD (kg/dia)', 'Peso Morto (kg)', 'Rendimento (%)']
+                        res_n = df_n_grid.groupby('mes_nasc').agg(agg_n).reset_index()
+                        res_n.columns = ['Mês Nasc.', 'Qtd', 'Peso Atual (kg)', 'Permanência (Dias)', 'Intervalo Pesagens (Dias)', 'GMD (kg/dia)', 'Peso Morto (kg)', 'Rendimento (%)']
                     elif nivel_n == "Por Mês e Sexo":
-                        res_n = df_n.groupby(['mes_nasc', 'sexo_label']).agg(agg_n).reset_index()
-                        res_n.columns = ['Mês Nasc.', 'Sexo', 'Qtd', 'Peso Atual (kg)', 'Permanência (Dias)', 'GMD (kg/dia)', 'Peso Morto (kg)', 'Rendimento (%)']
+                        res_n = df_n_grid.groupby(['mes_nasc', 'sexo_label']).agg(agg_n).reset_index()
+                        res_n.columns = ['Mês Nasc.', 'Sexo', 'Qtd', 'Peso Atual (kg)', 'Permanência (Dias)', 'Intervalo Pesagens (Dias)', 'GMD (kg/dia)', 'Peso Morto (kg)', 'Rendimento (%)']
                     else:
-                        res_n = df_n.groupby(['mes_nasc', 'sexo_label', 'status_animal']).agg(agg_n).reset_index()
-                        res_n.columns = ['Mês Nasc.', 'Sexo', 'Status', 'Qtd', 'Peso Atual (kg)', 'Permanência (Dias)', 'GMD (kg/dia)', 'Peso Morto (kg)', 'Rendimento (%)']
+                        res_n = df_n_grid.groupby(['mes_nasc', 'sexo_label', 'status_animal']).agg(agg_n).reset_index()
+                        res_n.columns = ['Mês Nasc.', 'Sexo', 'Status', 'Qtd', 'Peso Atual (kg)', 'Permanência (Dias)', 'Intervalo Pesagens (Dias)', 'GMD (kg/dia)', 'Peso Morto (kg)', 'Rendimento (%)']
                     
-                    fmt_n = {'Peso Atual (kg)': '{:.1f}', 'Permanência (Dias)': '{:.0f}', 'GMD (kg/dia)': '{:.3f}', 'Peso Morto (kg)': '{:.1f}', 'Rendimento (%)': '{:.1f}%'}
+                    fmt_n = {'Peso Atual (kg)': '{:.1f}', 'Permanência (Dias)': '{:.0f}', 'Intervalo Pesagens (Dias)': '{:.0f}', 'GMD (kg/dia)': '{:.3f}', 'Peso Morto (kg)': '{:.1f}', 'Rendimento (%)': '{:.1f}%'}
+                    res_n = append_total_row(res_n, fmt_n)
                     res_n = format_grid_df(res_n, fmt_n)
                     st.dataframe(res_n, use_container_width=True, hide_index=True)
                 else:
