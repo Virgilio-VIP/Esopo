@@ -2603,284 +2603,378 @@ def main():
             from datetime import timedelta
             vconn = get_vipper_connection()
 
-            # --- Load all 5 tables ---
+            # --- Load simulations ---
+            df_sim = pd.read_sql("SELECT * FROM tab_simulacao ORDER BY data DESC", vconn)
+            if df_sim.empty:
+                st.warning("Nenhuma simulação encontrada no banco de dados Vipper_KNW.")
+                vconn.close()
+                return
+
+            # A. Seletor de Simulação
+            sim_options = df_sim.apply(lambda r: f"{r['Cod_Simulacao']} - {r['Cod_Fazenda']} - {r['Cod_Plano']}", axis=1).tolist()
+            
+            c1, c2 = st.columns([3, 1])
+            with c1:
+                selected_sim_str = st.selectbox("Selecione a Simulação (Cod_Simulacao - Fazenda - Plano):", sim_options)
+            with c2:
+                st.markdown("<br>", unsafe_allow_html=True)
+                # The HTML markdown approach doesn't work well due to st.markdown sanitizing onClick attributes natively
+                # Using an iframe via components.html is the robust way to do this in Streamlit
+                
+                print_button_html = """
+                <!DOCTYPE html>
+                <html>
+                <head>
+                <style>
+                    .btn-print {
+                        display: block; 
+                        padding: 0.5rem 1rem; 
+                        background-color: #064e3b; 
+                        color: white !important; 
+                        border-radius: 4px; 
+                        text-decoration: none; 
+                        border: none;
+                        font-family: inherit; 
+                        font-size: 0.875rem; 
+                        font-weight: 500; 
+                        cursor: pointer;
+                        text-align: center;
+                        font-family: "Outfit", sans-serif;
+                    }
+                    .btn-print:hover { background-color: #059669; }
+                </style>
+                </head>
+                <body style="margin:0; padding:0; display:flex; justify-content:flex-end;">
+                    <button onclick="window.parent.print()" class="btn-print">
+                        📄 Exportar PDF
+                    </button>
+                </body>
+                </html>
+                """
+                
+                # Keep the CSS formatting for when the print actually triggers
+                st.markdown(
+                    '''
+                    <style>
+                        @media print {
+                            .stApp { background-color: white !important; }
+                            section[data-testid="stSidebar"] { display: none !important; }
+                            header[data-testid="stHeader"] { display: none !important; }
+                            div[data-testid="stToolbar"] { display: none !important; }
+                            /* Adjust widths and hide unnecessary elements for clear printing */
+                            .stMainBlockContainer { padding-top: 1rem !important; max-width: 100% !important; margin: 0 !important;}
+                        }
+                    </style>
+                    ''',
+                    unsafe_allow_html=True
+                )
+                
+                components.html(print_button_html, height=50)
+            
+            cod_sim = int(selected_sim_str.split(' - ')[0])
+            sim_row = df_sim[df_sim['Cod_Simulacao'] == cod_sim].iloc[0]
+            periodos = int(sim_row['Periodos'])
+            peso_alvo = float(sim_row['Peso_Alvo'])
+
+            # --- Load detailed data for selected simulation ---
             import warnings
             warnings.filterwarnings('ignore')
-            df_peso = pd.read_sql("SELECT * FROM tempdb..##TabEvolutionPeso", vconn)
-            df_cms  = pd.read_sql("SELECT * FROM tempdb..##TabEvolutionCMS", vconn)
-            df_frec = pd.read_sql("SELECT * FROM tempdb..##TabEvolutionFRec", vconn)
-            df_f40s = pd.read_sql("SELECT * FROM tempdb..##TabEvolutionF40S", vconn)
-            df_ur20 = pd.read_sql("SELECT * FROM tempdb..##TabEvolutionUr20", vconn)
+            df_peso = pd.read_sql(f"SELECT * FROM peso_simulado WHERE cod_simulacao={cod_sim}", vconn)
+            df_cms = pd.read_sql(f"SELECT * FROM CMS_simulado WHERE cod_simulacao={cod_sim}", vconn)
+            df_alim = pd.read_sql(f"SELECT * FROM alim_simulado WHERE cod_simulacao={cod_sim}", vconn)
+            
             vconn.close()
 
             if df_peso.empty:
-                st.warning("Nenhum dado de planejamento encontrado nas tabelas temporárias do Vipper_KNW.")
-            else:
-                # --- Detect number of periods dynamically ---
-                n_periods = 0
-                for i in range(1, 10):
-                    if f'Peso{i}' in df_peso.columns and df_peso[f'Peso{i}'].notna().any():
-                        n_periods = i
-                    else:
-                        break
+                st.info("A Simulação selecionada não possui dados processados em peso_simulado.")
+                return
 
-                # --- Compute period dates: P1=base+12d, P2=P1+30d, P3=P2+30d ---
-                base_date = pd.to_datetime(df_peso['data'].iloc[0])
-                tempo_p1 = int(df_peso['Tempo'].iloc[0]) if pd.notna(df_peso['Tempo'].iloc[0]) else 12
-                period_dates = [base_date]  # P0
-                period_dates.append(base_date + timedelta(days=tempo_p1))  # P1
-                for i in range(2, n_periods + 1):
-                    period_dates.append(period_dates[-1] + timedelta(days=30))
-                period_labels = [f"P{i} ({period_dates[i].strftime('%d/%m')})" for i in range(1, n_periods + 1)]
+            st.markdown(f"**Peso Alvo:** {peso_alvo} kg | **Períodos da Simulação:** {periodos}")
 
-                # --- Aggregate by Lote ---
-                lotes = sorted(df_peso['cod_lote'].unique())
-                rows = []
-                for lote in lotes:
-                    lp = df_peso[df_peso['cod_lote'] == lote]
-                    lc = df_cms[df_cms['cod_lote'] == lote]
-                    lf = df_frec[df_frec['cod_lote'] == lote]
-                    ls = df_f40s[df_f40s['cod_lote'] == lote]
-                    lu = df_ur20[df_ur20['cod_lote'] == lote]
-                    n_animais = len(lp)
-                    peso_ini = float(lp['Peso'].mean()) if not lp.empty else 0
-
-                    row = {'Lote': str(lote), 'Animais': n_animais, 'Peso Inicial': round(peso_ini, 1)}
-
-                    for i in range(1, n_periods + 1):
-                        pfx = period_labels[i - 1]
-                        # Peso/Ganho/Receita/Valor
-                        row[f'{pfx} Peso'] = round(float(lp[f'Peso{i}'].mean()), 1) if lp[f'Peso{i}'].notna().any() else None
-                        row[f'{pfx} Ganho'] = round(float(lp[f'G{i}'].sum()), 1) if lp[f'G{i}'].notna().any() else None
-                        row[f'{pfx} Receita'] = round(float(lp[f'Rec{i}'].sum()), 2) if lp[f'Rec{i}'].notna().any() else None
-                        # Diária (CMS)
-                        row[f'{pfx} Diária'] = round(float(lc[f'Diaria{i}'].sum()), 2) if not lc.empty and lc[f'Diaria{i}'].notna().any() else None
-                        # Produtos
-                        frec_custo = float(lf[f'Custo{i}'].sum()) if not lf.empty and lf[f'Custo{i}'].notna().any() else 0
-                        f40s_custo = float(ls[f'Custo{i}'].sum()) if not ls.empty and ls[f'Custo{i}'].notna().any() else 0
-                        ur20_custo = float(lu[f'Custo{i}'].sum()) if not lu.empty and lu[f'Custo{i}'].notna().any() else 0
-                        row[f'{pfx} FRec R$'] = round(frec_custo, 2) if frec_custo else None
-                        row[f'{pfx} F40S R$'] = round(f40s_custo, 2) if f40s_custo else None
-                        row[f'{pfx} Ur20 R$'] = round(ur20_custo, 2) if ur20_custo else None
-                        custo_prod = frec_custo + f40s_custo + ur20_custo
-                        diaria_val = row[f'{pfx} Diária'] or 0
-                        custo_total = diaria_val + custo_prod
-                        receita_val = row[f'{pfx} Receita'] or 0
-                        row[f'{pfx} Custo Total'] = round(custo_total, 2)
-                        row[f'{pfx} Saldo'] = round(receita_val - custo_total, 2)
-
-                    rows.append(row)
-
-                df_plan = pd.DataFrame(rows)
-
-                # --- KPI CARDS ---
-                total_animais = int(df_plan['Animais'].sum())
-                receita_total = 0
-                custo_diaria_total = 0
-                custo_prod_total = 0
-                ganho_total = 0
-                for i in range(1, n_periods + 1):
-                    pfx = period_labels[i - 1]
-                    receita_total += df_plan[f'{pfx} Receita'].sum() if f'{pfx} Receita' in df_plan.columns else 0
-                    custo_diaria_total += df_plan[f'{pfx} Diária'].sum() if f'{pfx} Diária' in df_plan.columns else 0
-                    ganho_total += df_plan[f'{pfx} Ganho'].sum() if f'{pfx} Ganho' in df_plan.columns else 0
-                    for prod in ['FRec R$', 'F40S R$', 'Ur20 R$']:
-                        col = f'{pfx} {prod}'
-                        if col in df_plan.columns:
-                            custo_prod_total += df_plan[col].sum() if df_plan[col].notna().any() else 0
-
-                custo_geral = custo_diaria_total + custo_prod_total
-                saldo_geral = receita_total - custo_geral
-
-                st.markdown("---")
-                kpi1, kpi2, kpi3, kpi4 = st.columns(4)
-                kpi1.metric("🐂 Animais", f"{total_animais}")
-                kpi2.metric("📈 Receita Total", f"R$ {receita_total:,.2f}")
-                kpi3.metric("📉 Custo Total", f"R$ {custo_geral:,.2f}")
-                delta_color = "normal" if saldo_geral >= 0 else "inverse"
-                kpi4.metric("💰 Saldo", f"R$ {saldo_geral:,.2f}", delta=f"R$ {saldo_geral:,.2f}", delta_color=delta_color)
-
-                # --- GRID: Evolução por Período e Lote ---
-                st.markdown("---")
-                st.markdown("""
-                    <div class="section-header" style="padding-bottom: 8px; border-bottom: 1px solid rgba(6,78,59,0.12);">
-                        <div class="icon-box icon-green">
-                            <span class="mat-icon">table_chart</span>
-                        </div>
-                        <div>
-                            <div class="section-title">Evolução por Período e Lote</div>
-                            <div class="section-subtitle">Peso, Receita, Custos e Saldo a cada período</div>
-                        </div>
+            # ==========================================
+            # C. Grid de Evolução (Agrupado por Lote) - AGORA PRIMEIRO NA TELA
+            # ==========================================
+            st.markdown("---")
+            st.markdown("""
+                <div class="section-header" style="padding-bottom: 8px; border-bottom: 1px solid rgba(6,78,59,0.12);">
+                    <div class="icon-box icon-green">
+                        <span class="mat-icon">table_rows</span>
                     </div>
-                """, unsafe_allow_html=True)
+                    <div>
+                        <div class="section-title">Evolução do Rebanho (Por Lote)</div>
+                        <div class="section-subtitle">Acompanhamento de peso médio e vendas por período</div>
+                    </div>
+                </div>
+            """, unsafe_allow_html=True)
 
-                # Build display dataframe
-                display_cols = ['Lote', 'Animais', 'Peso Inicial']
-                for i in range(1, n_periods + 1):
-                    pfx = period_labels[i - 1]
-                    display_cols.extend([f'{pfx} Peso', f'{pfx} Ganho', f'{pfx} Receita',
-                                         f'{pfx} Diária', f'{pfx} Custo Total', f'{pfx} Saldo'])
-                existing_cols = [c for c in display_cols if c in df_plan.columns]
-                df_display = df_plan[existing_cols].copy()
+            lotes = sorted(df_peso['cod_lote'].dropna().unique())
+            rows_lote = []
+            
+            dt_final_global = None
+            if 'dataFinal' in df_peso.columns and not df_peso['dataFinal'].dropna().empty:
+                dt_f = pd.to_datetime(df_peso['dataFinal'].dropna().iloc[0])
+                dt_final_global = dt_f.strftime('%d/%m/%Y') if hasattr(dt_f, 'strftime') else str(dt_f)[0:10]
+            else:
+                dt_final_global = "Final"
+                
+            for lote in lotes:
+                lp = df_peso[df_peso['cod_lote'] == lote]
+                n_inicial = len(lp)
+                peso_inicial = float(lp['Peso'].mean()) if not lp['Peso'].empty else 0.0
+                sexo = lp['sexo'].iloc[0] if not lp['sexo'].empty else ''
+                gpd_medio = float(lp['GPD'].mean()) if 'GPD' in lp.columns and not lp['GPD'].empty else 0.0
 
-                # Add TOTAL row
-                total_row = {}
-                for col in df_display.columns:
-                    if col == 'Lote':
-                        total_row[col] = 'TOTAL'
-                    elif col == 'Animais':
-                        total_row[col] = int(df_display[col].sum())
-                    elif col == 'Peso Inicial':
-                        total_row[col] = round(float(df_display[col].mean()), 1)
-                    elif 'Peso' in col:
-                        total_row[col] = round(float(df_display[col].mean()), 1) if df_display[col].notna().any() else None
-                    else:
-                        total_row[col] = round(float(df_display[col].sum()), 2) if df_display[col].notna().any() else None
-                df_display = pd.concat([df_display, pd.DataFrame([total_row])], ignore_index=True)
-                df_display = df_display.fillna('—')
+                row_l = {
+                    ('Animais', 'Lote'): str(lote),
+                    ('Animais', 'Qtd.'): n_inicial,
+                    ('Animais', 'Sexo'): sexo,
+                    ('Animais', 'Peso'): round(peso_inicial, 1),
+                    ('Animais', 'GPD'): round(gpd_medio, 3)
+                }
 
-                st.dataframe(df_display, use_container_width=True, hide_index=True)
+                n_prev = n_inicial
+                for i in range(1, periodos + 1):
+                    d_col = f'Data{i}'
+                    p_col = f'Peso{i}'
+                    if d_col in lp.columns:
+                        dt_val = df_peso[d_col].dropna().iloc[0] if not df_peso[d_col].dropna().empty else f"P{i}"
+                        dt_str = dt_val.strftime('%d/%m/%Y') if hasattr(dt_val, 'strftime') else str(dt_val)
+                        
+                        ativos_idx = lp[d_col].notna()
+                        n_ativos = int(ativos_idx.sum())
+                        
+                        n_vendidos = n_prev - n_ativos    
+                        n_prev = n_ativos
+                        
+                        peso_medio = float(lp.loc[ativos_idx, p_col].mean()) if p_col in lp.columns and ativos_idx.any() else None
+                        
+                        row_l[(dt_str, 'Qtd.')] = n_ativos
+                        row_l[(dt_str, 'Peso')] = round(peso_medio, 1) if pd.notna(peso_medio) else None
+                        row_l[(dt_str, 'Vendas')] = n_vendidos
 
-                # --- TOTALS BREAKDOWN ---
-                st.markdown("---")
-                tot_col1, tot_col2 = st.columns(2)
-                with tot_col1:
-                    st.markdown("""
-                        <div class="section-header" style="padding-bottom: 8px; border-bottom: 1px solid rgba(190,24,93,0.12);">
-                            <div class="icon-box icon-magenta">
-                                <span class="mat-icon">summarize</span>
-                            </div>
-                            <div>
-                                <div class="section-title">Totalização Geral</div>
-                                <div class="section-subtitle">Resumo financeiro consolidado</div>
-                            </div>
-                        </div>
-                    """, unsafe_allow_html=True)
+                if 'PesoFinal' in df_peso.columns:
+                    peso_fin = float(lp['PesoFinal'].mean()) if not lp['PesoFinal'].dropna().empty else None
+                    row_l[(dt_final_global, 'Peso Final')] = round(peso_fin, 1) if pd.notna(peso_fin) else None
+                    
+                rows_lote.append(row_l)
 
-                    # Build totals per product
-                    frec_total_vol = 0
-                    frec_total_custo = 0
-                    f40s_total_vol = 0
-                    f40s_total_custo = 0
-                    ur20_total_vol = 0
-                    ur20_total_custo = 0
-                    for i in range(1, n_periods + 1):
-                        ci = str(i)
-                        frec_total_vol += float(df_frec[f'C{ci}'].sum()) if df_frec[f'C{ci}'].notna().any() else 0
-                        frec_total_custo += float(df_frec[f'Custo{ci}'].sum()) if df_frec[f'Custo{ci}'].notna().any() else 0
-                        f40s_total_vol += float(df_f40s[f'C{ci}'].sum()) if df_f40s[f'C{ci}'].notna().any() else 0
-                        f40s_total_custo += float(df_f40s[f'Custo{ci}'].sum()) if df_f40s[f'Custo{ci}'].notna().any() else 0
-                        ur20_total_vol += float(df_ur20[f'C{ci}'].sum()) if df_ur20[f'C{ci}'].notna().any() else 0
-                        ur20_total_custo += float(df_ur20[f'Custo{ci}'].sum()) if df_ur20[f'Custo{ci}'].notna().any() else 0
+            # Para um MultiIndex funcionar no st.dataframe nativamente a partir do Pandas 1.4+ e Streamlit:
+            # precisamos preparar o dataframe usando set_index nas colunas corretamente.
+            columns_tuples = []
+            if rows_lote:
+                columns_tuples = list(rows_lote[0].keys())
 
-                    totals_data = {
-                        'Item': ['📈 Ganho Total (kg)', '💵 Receita Total (R$)', '🏠 Custo Diárias (R$)',
-                                 '🧪 FRec — Volume (kg)', '🧪 FRec — Custo (R$)',
-                                 '🧪 F40S — Volume (kg)', '🧪 F40S — Custo (R$)',
-                                 '🧪 Ur20 — Volume (kg)', '🧪 Ur20 — Custo (R$)',
-                                 '📦 Custo Total Produtos (R$)', '📉 Custo Total Geral (R$)',
-                                 '💰 SALDO GERAL (R$)'],
-                        'Valor': [f"{ganho_total:,.1f}", f"R$ {receita_total:,.2f}", f"R$ {custo_diaria_total:,.2f}",
-                                  f"{frec_total_vol:,.1f}", f"R$ {frec_total_custo:,.2f}",
-                                  f"{f40s_total_vol:,.1f}", f"R$ {f40s_total_custo:,.2f}",
-                                  f"{ur20_total_vol:,.1f}", f"R$ {ur20_total_custo:,.2f}",
-                                  f"R$ {custo_prod_total:,.2f}", f"R$ {custo_geral:,.2f}",
-                                  f"R$ {saldo_geral:,.2f}"]
-                    }
-                    st.dataframe(pd.DataFrame(totals_data), use_container_width=True, hide_index=True)
+            mux = pd.MultiIndex.from_tuples(columns_tuples)
+            
+            # Remove keys and flatten for dataframe creation, we assign mux directly to columns
+            data_flattened = []
+            for row in rows_lote:
+                data_flattened.append([row[col] for col in columns_tuples])
 
-                # --- CASH FLOW CHART ---
-                with tot_col2:
-                    st.markdown("""
-                        <div class="section-header" style="padding-bottom: 8px; border-bottom: 1px solid rgba(6,78,59,0.12);">
-                            <div class="icon-box icon-green">
-                                <span class="mat-icon">show_chart</span>
-                            </div>
-                            <div>
-                                <div class="section-title">Fluxo de Caixa por Período</div>
-                                <div class="section-subtitle">Receita vs Custos e Saldo acumulado</div>
-                            </div>
-                        </div>
-                    """, unsafe_allow_html=True)
+            df_lotes = pd.DataFrame(data_flattened, columns=mux)
+            
+            # Totalizer row
+            total_row_data = []
+            for col in mux:
+                group, name = col
+                if name in ['Qtd.', 'Vendas'] and name != 'Lote':
+                    total_row_data.append(df_lotes[col].sum())
+                elif name in ['Peso', 'GPD', 'Peso Final'] and name != 'Lote':
+                    med = float(df_lotes[col].mean()) if df_lotes[col].notna().any() else None
+                    total_row_data.append(round(med, 2) if med is not None else None)
+                elif name == 'Lote':
+                    total_row_data.append('TOTAL')
+                else:
+                    total_row_data.append(None)
+            
+            df_lotes.loc[len(df_lotes)] = total_row_data
+            df_lotes_disp = df_lotes.fillna('—')
+            
+            st.dataframe(df_lotes_disp, use_container_width=True)
 
-                    chart_data = []
-                    saldo_acumulado = 0
-                    for i in range(1, n_periods + 1):
-                        pfx = period_labels[i - 1]
-                        rec = float(df_plan[f'{pfx} Receita'].sum()) if f'{pfx} Receita' in df_plan.columns and df_plan[f'{pfx} Receita'].notna().any() else 0
-                        cst = float(df_plan[f'{pfx} Custo Total'].sum()) if f'{pfx} Custo Total' in df_plan.columns and df_plan[f'{pfx} Custo Total'].notna().any() else 0
-                        saldo_acumulado += rec - cst
-                        chart_data.append({'Período': pfx, 'Receita': rec, 'Custo': cst, 'Saldo Acumulado': saldo_acumulado})
 
-                    df_chart = pd.DataFrame(chart_data)
+            # ==========================================
+            # PREPARE DATA FOR RESUMO FINANCEIRO E GRÁFICO
+            # ==========================================
+            summary_rows = []
+            chart_data = []
 
-                    fig_cf = go.Figure()
-                    fig_cf.add_trace(go.Bar(x=df_chart['Período'], y=df_chart['Receita'], name='Receita',
-                                            marker_color='#059669'))
-                    fig_cf.add_trace(go.Bar(x=df_chart['Período'], y=df_chart['Custo'], name='Custo',
-                                            marker_color='#be185d'))
-                    fig_cf.add_trace(go.Scatter(x=df_chart['Período'], y=df_chart['Saldo Acumulado'],
-                                                name='Saldo Acumulado', line=dict(color='#d97706', width=3),
-                                                mode='lines+markers'))
-                    fig_cf.update_layout(
-                        barmode='group',
-                        paper_bgcolor='rgba(0,0,0,0)', plot_bgcolor='rgba(0,0,0,0)',
-                        font=dict(family='Outfit', size=13),
-                        margin=dict(t=10, b=40, l=60, r=20),
-                        legend=dict(orientation='h', y=1.15),
-                        yaxis=dict(title='R$')
-                    )
-                    st.plotly_chart(fig_cf, use_container_width=True)
+            for i in range(1, periodos + 1):
+                d_col = f'Data{i}'
+                if d_col not in df_peso.columns: continue
 
-                # --- VENDAS / FATURAMENTO ---
-                st.markdown("---")
+                dt_val = df_peso[d_col].dropna().iloc[0] if not df_peso[d_col].dropna().empty else f"P{i}"
+                dt_str = dt_val.strftime('%d/%m/%Y') if hasattr(dt_val, 'strftime') else str(dt_val)
+
+                # 1. Entradas
+                receitas = float(df_peso[f'Rec{i}'].sum()) if f'Rec{i}' in df_peso.columns and df_peso[f'Rec{i}'].notna().any() else 0.0
+
+                # Lógica de Venda
+                is_present = df_peso[f'Data{i}'].notna()
+                if i < periodos and f'Data{i+1}' in df_peso.columns:
+                    is_next_absent = df_peso[f'Data{i+1}'].isna()
+                else:
+                    # do not assume sale in last period unless explicitly missing before last checking
+                    is_next_absent = pd.Series(False, index=df_peso.index)
+                
+                sold_idx = is_present & is_next_absent
+                faturamento_vendas = float(df_peso.loc[sold_idx, f'Valor{i}'].sum()) if f'Valor{i}' in df_peso.columns and sold_idx.any() else 0.0
+
+                # 2. Saídas
+                custo_diarias = float(df_cms[f'Diaria{i}'].sum()) if f'Diaria{i}' in df_cms.columns and df_cms[f'Diaria{i}'].notna().any() else 0.0
+                
+                alim_custos_detalhe = {}
+                alim_consumo_detalhe = {}
+                total_custo_alim = 0.0
+                if not df_alim.empty and f'Custo{i}' in df_alim.columns and f'C{i}' in df_alim.columns and 'TIPOR' in df_alim.columns:
+                    for alim_name in df_alim['TIPOR'].unique():
+                        # Custo sum
+                        alim_val = float(df_alim.loc[df_alim['TIPOR'] == alim_name, f'Custo{i}'].sum())
+                        alim_val = alim_val if pd.notna(alim_val) else 0.0
+                        alim_custos_detalhe[alim_name] = alim_val
+                        total_custo_alim += alim_val
+                        
+                        # Consumo / Quantidade sum (C)
+                        alim_qtd = float(df_alim.loc[df_alim['TIPOR'] == alim_name, f'C{i}'].sum())
+                        alim_qtd = alim_qtd if pd.notna(alim_qtd) else 0.0
+                        alim_consumo_detalhe[alim_name] = alim_qtd
+
+                resultado_operacional = receitas - (custo_diarias + total_custo_alim)
+
+                row = {
+                    'Período': dt_str,
+                    'Receita': round(receitas, 2),
+                    'Venda': round(faturamento_vendas, 2),
+                    'Diária': round(custo_diarias, 2),
+                    'Alimentos': round(total_custo_alim, 2),
+                }
+                for k, v in alim_consumo_detalhe.items():
+                    row[f'{k}'] = round(v, 2)
+                    
+                row['Resultado'] = round(resultado_operacional, 2)
+                
+                summary_rows.append(row)
+                
+                chart_data.append({
+                    'Período': dt_str,
+                    'Receitas': receitas,
+                    'Custo Diárias': custo_diarias,
+                    'Custo Alimentos': total_custo_alim,
+                    'Custo Total Acumulado': custo_diarias + total_custo_alim,
+                    'Resultado': resultado_operacional
+                })
+
+            df_summary = pd.DataFrame(summary_rows)
+            df_chart = pd.DataFrame(chart_data)
+            
+            # calculate accumulated results for the chart using cumsum()
+            if not df_chart.empty:
+                df_chart['Resultado Acumulado'] = df_chart['Resultado'].cumsum()
+
+            
+            # ==========================================
+            # D. Resumo Colunar Grid e Gráfico (B) lado a lado
+            # ==========================================
+            st.markdown("---")
+            
+            col_grid, col_chart = st.columns([1, 1])
+            
+            with col_grid:
                 st.markdown("""
                     <div class="section-header" style="padding-bottom: 8px; border-bottom: 1px solid rgba(190,24,93,0.12);">
                         <div class="icon-box icon-magenta">
-                            <span class="mat-icon">point_of_sale</span>
+                            <span class="mat-icon">view_column</span>
                         </div>
                         <div>
-                            <div class="section-title">Projeção de Vendas e Faturamento</div>
-                            <div class="section-subtitle">Valor dos animais ao final de cada período</div>
+                            <div class="section-title">Resumo Financeiro</div>
+                            <div class="section-subtitle">Valores financeiros e volumes por data</div>
                         </div>
                     </div>
                 """, unsafe_allow_html=True)
+                
+                format_dict = {c: '{:,.2f}' for c in df_summary.columns if c != 'Período'}
+                st.dataframe(df_summary.style.format(format_dict), use_container_width=True, hide_index=True)
+                
+                # Cards abaixo do Grid
+                if not df_summary.empty:
+                    # Totais
+                    total_venda = df_summary['Venda'].sum()
+                    total_diaria = df_summary['Diária'].sum()
+                    total_alim_custo = df_summary['Alimentos'].sum()
+                    total_resultado = df_summary['Resultado'].sum()
+                    
+                    c1, c2, c3, c4 = st.columns(4)
+                    c1.metric("Faturamento", f"R$ {total_venda:,.2f}")
+                    c2.metric("Diárias", f"R$ {total_diaria:,.2f}")
+                    c3.metric("Alimentos", f"R$ {total_alim_custo:,.2f}")
+                    
+                    delta_color = "normal" if total_resultado >= 0 else "inverse"
+                    c4.metric("Resultado", f"R$ {total_resultado:,.2f}", delta=f"R$ {total_resultado:,.2f}", delta_color=delta_color)
+                    
+                    # Cards menores para o volume de cada alimento
+                    food_cols = [c for c in df_summary.columns if c not in ['Período', 'Receita', 'Venda', 'Diária', 'Alimentos', 'Resultado']]
+                    if food_cols:
+                        st.markdown("<h5 style='font-size: 0.9rem; font-weight: 600; color: #475569; margin-top: 10px;'>Volumes Totais de Alimentos</h5>", unsafe_allow_html=True)
+                        f_cols = st.columns(len(food_cols))
+                        for idx, f_col in enumerate(food_cols):
+                            total_vol = df_summary[f_col].sum()
+                            f_cols[idx].metric(f_col, f"{total_vol:,.1f} kg")
 
-                venda_rows = []
-                for lote in lotes:
-                    lp = df_peso[df_peso['cod_lote'] == lote]
-                    n = len(lp)
-                    vr = {'Lote': str(lote), 'Animais': n}
-                    for i in range(1, n_periods + 1):
-                        pfx = period_labels[i - 1]
-                        valor_col = f'Valor{i}'
-                        if valor_col in lp.columns and lp[valor_col].notna().any():
-                            valor_medio = float(lp[valor_col].mean())
-                            vr[f'{pfx} Valor Unitário'] = round(valor_medio, 2)
-                            vr[f'{pfx} Faturamento'] = round(valor_medio * n, 2)
-                        else:
-                            vr[f'{pfx} Valor Unitário'] = None
-                            vr[f'{pfx} Faturamento'] = None
-                    venda_rows.append(vr)
+            with col_chart:
+                st.markdown("""
+                    <div class="section-header" style="padding-bottom: 8px; border-bottom: 1px solid rgba(6,78,59,0.12);">
+                        <div class="icon-box icon-green">
+                            <span class="mat-icon">show_chart</span>
+                        </div>
+                        <div>
+                            <div class="section-title">Evolução Financeira</div>
+                            <div class="section-subtitle">Receitas, Custos e Resultado Acumulado</div>
+                        </div>
+                    </div>
+                """, unsafe_allow_html=True)
+                
+                fig = go.Figure()
 
-                df_vendas = pd.DataFrame(venda_rows)
-                # Add total
-                vt = {}
-                for col in df_vendas.columns:
-                    if col == 'Lote':
-                        vt[col] = 'TOTAL'
-                    elif col == 'Animais':
-                        vt[col] = int(df_vendas[col].sum())
-                    elif 'Unitário' in col:
-                        vt[col] = round(float(df_vendas[col].mean()), 2) if df_vendas[col].notna().any() else None
-                    else:
-                        vt[col] = round(float(df_vendas[col].sum()), 2) if df_vendas[col].notna().any() else None
-                df_vendas = pd.concat([df_vendas, pd.DataFrame([vt])], ignore_index=True).fillna('—')
-                st.dataframe(df_vendas, use_container_width=True, hide_index=True)
+                if not df_chart.empty:
+                    fig.add_trace(go.Bar(
+                        x=df_chart['Período'], y=df_chart['Receitas'], 
+                        name='Receitas', marker_color='#059669', 
+                    ))
+                    
+                    # Plotly 'relative' stacking works by summing numbers from zero.
+                    # Because we want to show positive costs visually grouped next to bars but stacked with each other
+                    # We can use stacked bars where costs are stacked down (using negative numbers) 
+                    # and the y-axis will be mapped to absolute values if needed
+                    fig.add_trace(go.Bar(
+                        x=df_chart['Período'], y=[-abs(v) for v in df_chart['Custo Diárias']], 
+                        name='Custo Diárias', marker_color='#be185d',
+                        customdata=df_chart['Custo Diárias'],
+                        hovertemplate='Custo Diárias: R$ %{customdata:,.2f}<extra></extra>' 
+                    ))
+                    
+                    fig.add_trace(go.Bar(
+                        x=df_chart['Período'], y=[-abs(v) for v in df_chart['Custo Alimentos']], 
+                        name='Custo Alimentos', marker_color='#fb7185',
+                        customdata=df_chart['Custo Alimentos'],
+                        hovertemplate='Custo Alimentos: R$ %{customdata:,.2f}<extra></extra>' 
+                    ))
+                    
+                    fig.add_trace(go.Scatter(x=df_chart['Período'], y=df_chart['Resultado Acumulado'], name='Resultado Acumulado',
+                                             line=dict(color='#d97706', width=3), mode='lines+markers'))
+                    
+                fig.update_layout(
+                    barmode='relative',  # Receitas go up (+), Custos go down (-) stacked
+                    paper_bgcolor='rgba(0,0,0,0)', plot_bgcolor='rgba(0,0,0,0)',
+                    font=dict(family='Outfit', size=13),
+                    margin=dict(t=10, b=40, l=60, r=20),
+                    legend=dict(orientation='h', y=1.15),
+                    yaxis=dict(title='R$', tickformat='~s')
+                )
+                st.plotly_chart(fig, use_container_width=True)
 
         except Exception as e:
             st.error(f"❌ Erro ao carregar dados de Planejamento: {e}")
-            st.info("Verifique se as tabelas temporárias ##TabEvolution* estão ativas no SQL Server (sessão Vipper_KNW aberta).")
+            st.info("Verifique se as tabelas de simulação existem e possuem dados válidos no banco Vipper_KNW.")
 
 if __name__ == "__main__":
     main()
