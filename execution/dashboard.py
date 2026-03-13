@@ -2147,6 +2147,217 @@ def main():
             else:
                 st.info("Nenhum dado de lote encontrado para as fazendas selecionadas.")
 
+            # --- Gráfico de Sazonalidade do GPD ---
+            st.markdown("---")
+            st.markdown("""
+                <div class="section-header">
+                    <div class="icon-box icon-magenta">
+                        <span class="mat-icon">insights</span>
+                    </div>
+                    <div>
+                        <div class="section-title">Sazonalidade do GPD</div>
+                        <div class="section-subtitle">Variação do ganho de peso diário ao longo dos meses do ano</div>
+                    </div>
+                </div>
+            """, unsafe_allow_html=True)
+            
+            try:
+                import numpy as np
+                # Buscar pesagens sequenciais por animal, filtradas pelas fazendas selecionadas
+                sql_gpd_sazonal = f"""
+                    SELECT 
+                        pc.cod_animal,
+                        pc.data,
+                        pc.peso,
+                        pc.GPD,
+                        LAG(pc.data) OVER (PARTITION BY pc.cod_animal ORDER BY pc.data) as data_anterior,
+                        LAG(pc.peso) OVER (PARTITION BY pc.cod_animal ORDER BY pc.data) as peso_anterior
+                    FROM cad_pesagem_corte pc
+                    JOIN cad_fichario c ON pc.cod_animal = c.cod_animal
+                    WHERE c.cod_fazenda IN ({farm_ids_str})
+                      AND pc.data >= DATEADD(month, -{periodo}, GETDATE())
+                    ORDER BY pc.cod_animal, pc.data
+                """
+                df_pesagens = pd.read_sql(sql_gpd_sazonal, conn)
+                
+                if not df_pesagens.empty:
+                    # Filtrar apenas linhas com pesagem anterior (pares sequenciais)
+                    df_pares = df_pesagens.dropna(subset=['data_anterior', 'peso_anterior']).copy()
+                    
+                    if not df_pares.empty:
+                        # Calcular GPD real entre pesagens sequenciais
+                        df_pares['dias_intervalo'] = (df_pares['data'] - df_pares['data_anterior']).dt.days
+                        df_pares['gpd_calc'] = (df_pares['peso'] - df_pares['peso_anterior']) / df_pares['dias_intervalo'].replace(0, np.nan)
+                        df_pares = df_pares.dropna(subset=['gpd_calc'])
+                        df_pares = df_pares[df_pares['dias_intervalo'] > 0]  # Apenas intervalos válidos
+                        
+                        # Distribuir o GPD pelos meses cobertos entre as duas pesagens
+                        registros_mensais = []
+                        for _, row in df_pares.iterrows():
+                            dt_ini = row['data_anterior']
+                            dt_fim = row['data']
+                            gpd_val = row['gpd_calc']
+                            
+                            # Gerar cada mês coberto pelo intervalo
+                            current = dt_ini.replace(day=1)
+                            end_month = dt_fim.replace(day=1)
+                            while current <= end_month:
+                                registros_mensais.append({
+                                    'mes_numero': current.month,
+                                    'gpd': gpd_val
+                                })
+                                # Avançar para o próximo mês
+                                if current.month == 12:
+                                    current = current.replace(year=current.year + 1, month=1)
+                                else:
+                                    current = current.replace(month=current.month + 1)
+                        
+                        if registros_mensais:
+                            df_mensal = pd.DataFrame(registros_mensais)
+                            
+                            # Calcular estatísticas por mês
+                            stats = df_mensal.groupby('mes_numero')['gpd'].agg(
+                                media='mean',
+                                mediana='median',
+                                desvio='std',
+                                contagem='count'
+                            ).reset_index()
+                            
+                            # Nomes dos meses em PT-BR
+                            meses_nomes = {1:'Jan', 2:'Fev', 3:'Mar', 4:'Abr', 5:'Mai', 6:'Jun',
+                                           7:'Jul', 8:'Ago', 9:'Set', 10:'Out', 11:'Nov', 12:'Dez'}
+                            stats['Mês'] = stats['mes_numero'].map(meses_nomes)
+                            stats = stats.sort_values('mes_numero')
+                            
+                            # Grid com estatísticas e Gráfico lado a lado
+                            col_stats, col_gpd_chart = st.columns([1, 2])
+                            
+                            with col_stats:
+                                st.markdown("""
+                                    <div class="section-header" style="padding-bottom: 6px; border-bottom: 1px solid rgba(190,24,93,0.12);">
+                                        <div class="icon-box icon-green">
+                                            <span class="mat-icon">table_chart</span>
+                                        </div>
+                                        <div>
+                                            <div class="section-title" style="font-size: 0.95rem;">Estatísticas Mensais</div>
+                                            <div class="section-subtitle">GPD (kg/dia) por mês do ano</div>
+                                        </div>
+                                    </div>
+                                """, unsafe_allow_html=True)
+                                
+                                display_stats = stats[['Mês', 'contagem', 'media', 'mediana', 'desvio']].copy()
+                                display_stats.columns = ['Mês', 'Qtd GPDs', 'Média', 'Mediana', 'Desvio Padrão']
+                                st.dataframe(
+                                    display_stats.style.format({
+                                        'Média': '{:.3f}',
+                                        'Mediana': '{:.3f}',
+                                        'Desvio Padrão': '{:.3f}'
+                                    }),
+                                    use_container_width=True,
+                                    hide_index=True,
+                                    height=460
+                                )
+                            
+                            with col_gpd_chart:
+                                import altair as alt
+                                
+                                # Preparar dados para curvas de média e mediana + faixa de desvio padrão
+                                stats['limite_sup'] = stats['media'] + stats['desvio']
+                                stats['limite_inf'] = (stats['media'] - stats['desvio']).clip(lower=0)
+                                
+                                # Faixa do desvio padrão (área sombreada)
+                                area = alt.Chart(stats).mark_area(
+                                    opacity=0.15, color='#059669'
+                                ).encode(
+                                    x=alt.X('Mês:O', sort=list(meses_nomes.values()), title='', axis=alt.Axis(labelAngle=0)),
+                                    y=alt.Y('limite_inf:Q', title='GPD (kg/dia)'),
+                                    y2='limite_sup:Q'
+                                )
+                                
+                                # Linha da Média
+                                line_media = alt.Chart(stats).mark_line(
+                                    color='#059669', strokeWidth=3
+                                ).encode(
+                                    x=alt.X('Mês:O', sort=list(meses_nomes.values())),
+                                    y=alt.Y('media:Q'),
+                                    tooltip=[
+                                        alt.Tooltip('Mês:O'),
+                                        alt.Tooltip('media:Q', format='.3f', title='Média'),
+                                        alt.Tooltip('contagem:Q', title='Qtd GPDs')
+                                    ]
+                                )
+                                
+                                points_media = alt.Chart(stats).mark_circle(
+                                    color='#059669', size=60
+                                ).encode(
+                                    x=alt.X('Mês:O', sort=list(meses_nomes.values())),
+                                    y='media:Q'
+                                )
+                                
+                                # Linha da Mediana
+                                line_mediana = alt.Chart(stats).mark_line(
+                                    color='#be185d', strokeWidth=2, strokeDash=[6, 3]
+                                ).encode(
+                                    x=alt.X('Mês:O', sort=list(meses_nomes.values())),
+                                    y=alt.Y('mediana:Q'),
+                                    tooltip=[
+                                        alt.Tooltip('Mês:O'),
+                                        alt.Tooltip('mediana:Q', format='.3f', title='Mediana')
+                                    ]
+                                )
+                                
+                                points_mediana = alt.Chart(stats).mark_circle(
+                                    color='#be185d', size=40
+                                ).encode(
+                                    x=alt.X('Mês:O', sort=list(meses_nomes.values())),
+                                    y='mediana:Q'
+                                )
+                                
+                                # Barras de contagem (eixo secundário simulado com opacidade leve)
+                                bars_qtd = alt.Chart(stats).mark_bar(
+                                    color='#94a3b8', opacity=0.2
+                                ).encode(
+                                    x=alt.X('Mês:O', sort=list(meses_nomes.values())),
+                                    y=alt.Y('contagem:Q', title=''),
+                                    tooltip=[
+                                        alt.Tooltip('Mês:O'),
+                                        alt.Tooltip('contagem:Q', title='Qtd GPDs')
+                                    ]
+                                )
+                                
+                                # Compor o gráfico final
+                                gpd_chart = alt.layer(
+                                    bars_qtd, area, line_media, points_media, line_mediana, points_mediana
+                                ).resolve_scale(
+                                    y='independent'
+                                ).properties(
+                                    height=420
+                                ).configure_view(
+                                    strokeWidth=0
+                                ).configure_axis(
+                                    labelFont='Outfit', titleFont='Outfit',
+                                    gridOpacity=0.15
+                                )
+                                
+                                st.altair_chart(gpd_chart, use_container_width=True)
+                                
+                                # Legenda manual via HTML
+                                st.markdown('''
+                                    <div style="display:flex; gap:20px; justify-content:center; font-size:0.8rem; color:#475569; margin-top:-10px;">
+                                        <div><span style="display:inline-block; width:20px; height:3px; background:#059669; vertical-align:middle; margin-right:4px;"></span> Média</div>
+                                        <div><span style="display:inline-block; width:20px; height:3px; background:#be185d; border-top:2px dashed #be185d; vertical-align:middle; margin-right:4px;"></span> Mediana</div>
+                                        <div><span style="display:inline-block; width:14px; height:14px; background:rgba(5,150,105,0.15); vertical-align:middle; margin-right:4px; border-radius:2px;"></span> Faixa DP</div>
+                                        <div><span style="display:inline-block; width:14px; height:14px; background:rgba(148,163,184,0.2); vertical-align:middle; margin-right:4px; border-radius:2px;"></span> Qtd GPDs</div>
+                                    </div>
+                                ''', unsafe_allow_html=True)
+                        else:
+                            st.info("Não há dados suficientes de pesagens sequenciais para gerar o gráfico de sazonalidade.")
+                    else:
+                        st.info("Não há pares de pesagens sequenciais no período selecionado.")
+                else:
+                    st.info("Nenhuma pesagem encontrada no período selecionado para as fazendas.")
+            except Exception as e:
+                st.error(f"❌ Erro ao calcular sazonalidade do GPD: {e}")
         # =====================================================
         # PLANEJAMENTO PAGE
         # =====================================================
@@ -2657,12 +2868,61 @@ def main():
                     '''
                     <style>
                         @media print {
-                            .stApp { background-color: white !important; }
+                            body, .stApp {
+                                -webkit-print-color-adjust: exact !important;
+                                print-color-adjust: exact !important;
+                            }
+                            
+                            @page {
+                                size: landscape;
+                                margin: 1cm;
+                            }
+                            .stApp { background-color: white !important; color: black !important; }
+                            
+                            /* Ocultar elementos desnecessarios na impressao */
                             section[data-testid="stSidebar"] { display: none !important; }
                             header[data-testid="stHeader"] { display: none !important; }
                             div[data-testid="stToolbar"] { display: none !important; }
-                            /* Adjust widths and hide unnecessary elements for clear printing */
-                            .stMainBlockContainer { padding-top: 1rem !important; max-width: 100% !important; margin: 0 !important;}
+                            
+                            /* Cleanup padding and borders */
+                            .stMainBlockContainer { 
+                                padding-top: 1rem !important; 
+                            }
+                            
+                            /* Forcar o Dataframe do Streamlit a caber na largura da folha A4 paisagem sem ficar minúsculo */
+                            [data-testid="stDataFrame"] {
+                                zoom: 0.88 !important;
+                                /* Safari fallback: */
+                                -webkit-transform: scale(0.88);
+                                -webkit-transform-origin: 0 0;
+                            }
+                            
+                            /* Desativar Breakpoint Mobile de Colunas do Streamlit no modo Print para manter lado-a-lado 50/50 nas divs */
+                            [data-testid="stHorizontalBlock"] {
+                                flex-wrap: nowrap !important;
+                                display: flex !important;
+                            }
+                            [data-testid="column"] {
+                                width: 50% !important;
+                                min-width: 50% !important;
+                                max-width: 50% !important;
+                                flex: 1 1 50% !important;
+                            }
+                            
+                            /* Forcar visibilidade dos Cards (Metric) que perdem contraste no fundo branco do PDF */
+                            [data-testid="stMetric"], [data-testid="stMetricValue"], [data-testid="stMetricLabel"], [data-testid="stMetricDelta"] {
+                                color: black !important;
+                                display: block !important;
+                                visibility: visible !important;
+                            }
+                            
+                            /* O background do Plotly/Altair sera transparente no SVG/Canvas sem forçar */
+                            
+                            /* Evitar que blocos fatiem no meio de uma pagina p/ outra */
+                            .element-container { 
+                                break-inside: avoid !important; 
+                                page-break-inside: avoid; 
+                            }
                         }
                     </style>
                     ''',
@@ -2895,7 +3155,7 @@ def main():
                 format_dict = {c: '{:,.2f}' for c in df_summary.columns if c != 'Período'}
                 st.dataframe(df_summary.style.format(format_dict), use_container_width=True, hide_index=True)
                 
-                # Cards abaixo do Grid
+                # Cards abaixo do Grid - usando HTML puro para garantir renderização no PDF
                 if not df_summary.empty:
                     # Totais
                     total_venda = df_summary['Venda'].sum()
@@ -2903,22 +3163,53 @@ def main():
                     total_alim_custo = df_summary['Alimentos'].sum()
                     total_resultado = df_summary['Resultado'].sum()
                     
-                    c1, c2, c3, c4 = st.columns(4)
-                    c1.metric("Faturamento", f"R$ {total_venda:,.2f}")
-                    c2.metric("Diárias", f"R$ {total_diaria:,.2f}")
-                    c3.metric("Alimentos", f"R$ {total_alim_custo:,.2f}")
-                    
-                    delta_color = "normal" if total_resultado >= 0 else "inverse"
-                    c4.metric("Resultado", f"R$ {total_resultado:,.2f}", delta=f"R$ {total_resultado:,.2f}", delta_color=delta_color)
+                    resultado_color = '#059669' if total_resultado >= 0 else '#dc2626'
                     
                     # Cards menores para o volume de cada alimento
                     food_cols = [c for c in df_summary.columns if c not in ['Período', 'Receita', 'Venda', 'Diária', 'Alimentos', 'Resultado']]
+                    food_cards_html = ''
+                    for f_col in food_cols:
+                        total_vol = df_summary[f_col].sum()
+                        food_cards_html += f'''
+                            <div style="flex:1; text-align:center; padding: 6px 4px; background: #f8fafc; border-radius: 6px; border: 1px solid #e2e8f0;">
+                                <div style="font-size: 0.7rem; color: #64748b; font-weight:600;">{f_col}</div>
+                                <div style="font-size: 0.85rem; font-weight: 700; color: #1e293b;">{total_vol:,.1f} kg</div>
+                            </div>'''
+                    
+                    cards_html = f'''
+                    <div style="display: flex; gap: 8px; margin-top: 12px; flex-wrap: wrap;">
+                        <div style="flex:1; text-align:center; padding: 8px 6px; background: #f0fdf4; border-radius: 8px; border: 1px solid #bbf7d0;">
+                            <div style="font-size: 0.7rem; color: #64748b; font-weight:600;">Faturamento</div>
+                            <div style="font-size: 0.9rem; font-weight: 700; color: #059669;">R$ {total_venda:,.2f}</div>
+                        </div>
+                        <div style="flex:1; text-align:center; padding: 8px 6px; background: #fdf2f8; border-radius: 8px; border: 1px solid #fbcfe8;">
+                            <div style="font-size: 0.7rem; color: #64748b; font-weight:600;">Diárias</div>
+                            <div style="font-size: 0.9rem; font-weight: 700; color: #be185d;">R$ {total_diaria:,.2f}</div>
+                        </div>
+                        <div style="flex:1; text-align:center; padding: 8px 6px; background: #fff1f2; border-radius: 8px; border: 1px solid #fecdd3;">
+                            <div style="font-size: 0.7rem; color: #64748b; font-weight:600;">Alimentos</div>
+                            <div style="font-size: 0.9rem; font-weight: 700; color: #e11d48;">R$ {total_alim_custo:,.2f}</div>
+                        </div>
+                        <div style="flex:1; text-align:center; padding: 8px 6px; background: #f8fafc; border-radius: 8px; border: 2px solid {resultado_color};">
+                            <div style="font-size: 0.7rem; color: #64748b; font-weight:600;">Resultado</div>
+                            <div style="font-size: 0.9rem; font-weight: 700; color: {resultado_color};">R$ {total_resultado:,.2f}</div>
+                        </div>
+                    </div>
+                    '''
+                    st.markdown(cards_html, unsafe_allow_html=True)
+                    
+                    # Cards de volume de alimentos - construídos via concatenação simples
                     if food_cols:
-                        st.markdown("<h5 style='font-size: 0.9rem; font-weight: 600; color: #475569; margin-top: 10px;'>Volumes Totais de Alimentos</h5>", unsafe_allow_html=True)
-                        f_cols = st.columns(len(food_cols))
-                        for idx, f_col in enumerate(food_cols):
+                        food_html = '<div style="margin-top: 8px; font-size: 0.8rem; font-weight: 600; color: #475569;">Volumes Totais de Alimentos</div>'
+                        food_html += '<div style="display: flex; gap: 6px; margin-top: 4px;">'
+                        for f_col in food_cols:
                             total_vol = df_summary[f_col].sum()
-                            f_cols[idx].metric(f_col, f"{total_vol:,.1f} kg")
+                            food_html += '<div style="flex:1; text-align:center; padding: 6px 4px; background: #f8fafc; border-radius: 6px; border: 1px solid #e2e8f0;">'
+                            food_html += '<div style="font-size: 0.7rem; color: #64748b; font-weight:600;">' + str(f_col) + '</div>'
+                            food_html += '<div style="font-size: 0.85rem; font-weight: 700; color: #1e293b;">' + f"{total_vol:,.1f} kg" + '</div>'
+                            food_html += '</div>'
+                        food_html += '</div>'
+                        st.markdown(food_html, unsafe_allow_html=True)
 
             with col_chart:
                 st.markdown("""
@@ -2933,44 +3224,61 @@ def main():
                     </div>
                 """, unsafe_allow_html=True)
                 
-                fig = go.Figure()
+                import altair as alt
 
                 if not df_chart.empty:
-                    fig.add_trace(go.Bar(
-                        x=df_chart['Período'], y=df_chart['Receitas'], 
-                        name='Receitas', marker_color='#059669', 
-                    ))
+                    n_periodos = len(df_chart)
+                    # Largura dinâmica das barras: quanto mais períodos, mais finas
+                    bar_size = max(8, min(35, int(180 / n_periodos)))
                     
-                    # Plotly 'relative' stacking works by summing numbers from zero.
-                    # Because we want to show positive costs visually grouped next to bars but stacked with each other
-                    # We can use stacked bars where costs are stacked down (using negative numbers) 
-                    # and the y-axis will be mapped to absolute values if needed
-                    fig.add_trace(go.Bar(
-                        x=df_chart['Período'], y=[-abs(v) for v in df_chart['Custo Diárias']], 
-                        name='Custo Diárias', marker_color='#be185d',
-                        customdata=df_chart['Custo Diárias'],
-                        hovertemplate='Custo Diárias: R$ %{customdata:,.2f}<extra></extra>' 
-                    ))
+                    # Configurando o dataset para a lógica de "Receitas Lado a Lado com Custos Empilhados"
+                    df_bars = df_chart[['Período', 'Receitas', 'Custo Diárias', 'Custo Alimentos']].copy()
+                    df_bars = df_bars.melt(id_vars=['Período'], var_name='Categoria', value_name='Valor')
                     
-                    fig.add_trace(go.Bar(
-                        x=df_chart['Período'], y=[-abs(v) for v in df_chart['Custo Alimentos']], 
-                        name='Custo Alimentos', marker_color='#fb7185',
-                        customdata=df_chart['Custo Alimentos'],
-                        hovertemplate='Custo Alimentos: R$ %{customdata:,.2f}<extra></extra>' 
-                    ))
+                    # Vamos ter 2 grupos paralelos por Data: 'Receitas' e 'Custos'
+                    df_bars['Grupo'] = df_bars['Categoria'].apply(lambda c: 'Receita' if c == 'Receitas' else 'Custo')
+                    df_bars['Valor'] = df_bars['Valor'].abs()
                     
-                    fig.add_trace(go.Scatter(x=df_chart['Período'], y=df_chart['Resultado Acumulado'], name='Resultado Acumulado',
-                                             line=dict(color='#d97706', width=3), mode='lines+markers'))
+                    # Barras de receitas e custos lado a lado
+                    bars = alt.Chart(df_bars).mark_bar(size=bar_size).encode(
+                        x=alt.X('Período:O', title='', sort=None, axis=alt.Axis(labelAngle=-25)),
+                        xOffset=alt.XOffset('Grupo:N', sort=['Receita', 'Custo']),
+                        y=alt.Y('Valor:Q', title='R$', axis=alt.Axis(format='~s')),
+                        color=alt.Color('Categoria:N', 
+                            scale=alt.Scale(
+                                domain=['Receitas', 'Custo Diárias', 'Custo Alimentos'],
+                                range=['#059669', '#be185d', '#fb7185']
+                            ),
+                            legend=alt.Legend(title=None, orient='top', labelFontSize=11)
+                        ),
+                        tooltip=[alt.Tooltip('Período:O'), alt.Tooltip('Categoria:N'), alt.Tooltip('Valor:Q', format=',.2f', title='Valor (R$)')]
+                    )
+
+                    # Linha de resultado acumulado cruzando o gráfico
+                    line = alt.Chart(df_chart).mark_line(color='#d97706', strokeWidth=3).encode(
+                        x=alt.X('Período:O', sort=None),
+                        y=alt.Y('Resultado Acumulado:Q', title=''),
+                        tooltip=[alt.Tooltip('Período:O'), alt.Tooltip('Resultado Acumulado:Q', format=',.2f', title='Resultado Acumulado (R$)')]
+                    )
                     
-                fig.update_layout(
-                    barmode='relative',  # Receitas go up (+), Custos go down (-) stacked
-                    paper_bgcolor='rgba(0,0,0,0)', plot_bgcolor='rgba(0,0,0,0)',
-                    font=dict(family='Outfit', size=13),
-                    margin=dict(t=10, b=40, l=60, r=20),
-                    legend=dict(orientation='h', y=1.15),
-                    yaxis=dict(title='R$', tickformat='~s')
-                )
-                st.plotly_chart(fig, use_container_width=True)
+                    # Marcadores para as pontas da linha
+                    points = alt.Chart(df_chart).mark_circle(color='#d97706', size=60, opacity=1).encode(
+                        x=alt.X('Período:O', sort=None),
+                        y=alt.Y('Resultado Acumulado:Q', title='')
+                    )
+
+                    final_chart = (bars + line + points).properties(
+                        height=320
+                    ).configure_view(
+                        strokeWidth=0
+                    ).configure_axis(
+                        labelFont='Outfit', titleFont='Outfit',
+                        gridOpacity=0.2
+                    )
+
+                    st.altair_chart(final_chart, use_container_width=True)
+                else:
+                    st.info("Não há dados financeiros para exibir.")
 
         except Exception as e:
             st.error(f"❌ Erro ao carregar dados de Planejamento: {e}")
