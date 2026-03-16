@@ -2164,6 +2164,9 @@ def main():
             try:
                 import numpy as np
                 # Buscar pesagens sequenciais por animal, filtradas pelas fazendas selecionadas
+                # Buscar TODAS as pesagens (sem filtro de data) para que o LAG()
+                # consiga acessar a pesagem anterior mesmo que ela esteja fora do período.
+                # O filtro de período será aplicado depois, no Python.
                 sql_gpd_sazonal = f"""
                     SELECT 
                         pc.cod_animal,
@@ -2175,7 +2178,6 @@ def main():
                     FROM cad_pesagem_corte pc
                     JOIN cad_fichario c ON pc.cod_animal = c.cod_animal
                     WHERE c.cod_fazenda IN ({farm_ids_str})
-                      AND pc.data >= DATEADD(month, -{periodo}, GETDATE())
                     ORDER BY pc.cod_animal, pc.data
                 """
                 df_pesagens = pd.read_sql(sql_gpd_sazonal, conn)
@@ -2184,12 +2186,22 @@ def main():
                     # Filtrar apenas linhas com pesagem anterior (pares sequenciais)
                     df_pares = df_pesagens.dropna(subset=['data_anterior', 'peso_anterior']).copy()
                     
+                    # Agora sim, filtrar pelo período selecionado pelo slider
+                    # Considerar pares onde a data da pesagem atual está dentro do período
+                    dt_limite = pd.Timestamp.now() - pd.DateOffset(months=periodo)
+                    df_pares = df_pares[df_pares['data'] >= dt_limite]
+                    
                     if not df_pares.empty:
                         # Calcular GPD real entre pesagens sequenciais
                         df_pares['dias_intervalo'] = (df_pares['data'] - df_pares['data_anterior']).dt.days
                         df_pares['gpd_calc'] = (df_pares['peso'] - df_pares['peso_anterior']) / df_pares['dias_intervalo'].replace(0, np.nan)
-                        df_pares = df_pares.dropna(subset=['gpd_calc'])
-                        df_pares = df_pares[df_pares['dias_intervalo'] > 0]  # Apenas intervalos válidos
+                    # Intervenção do Virgilo
+                    # Períodos pequenos levando a GPDs inexistentes pelo peso médio e abate individual
+                    #    df_pares = df_pares.dropna(subset=['gpd_calc'])
+                    #    df_pares = df_pares[df_pares['dias_intervalo'] > 0]  # Apenas intervalos válidos
+                        df_pares = df_pares.dropna(subset=['gpd_calc'])  
+                        df_pares = df_pares[df_pares['gpd_calc'].between(-2, 2)] # Apenas valores reais, incluindo negativos.
+                        df_pares = df_pares[df_pares['dias_intervalo'] > 15]  # Apenas intervalos reais
                         
                         # Distribuir o GPD pelos meses cobertos entre as duas pesagens
                         registros_mensais = []
@@ -2270,7 +2282,7 @@ def main():
                                     opacity=0.15, color='#059669'
                                 ).encode(
                                     x=alt.X('Mês:O', sort=list(meses_nomes.values()), title='', axis=alt.Axis(labelAngle=0)),
-                                    y=alt.Y('limite_inf:Q', title='GPD (kg/dia)'),
+                                    y=alt.Y('limite_inf:Q', axis=alt.Axis(orient='right')),
                                     y2='limite_sup:Q'
                                 )
                                 
@@ -2279,7 +2291,7 @@ def main():
                                     color='#059669', strokeWidth=3
                                 ).encode(
                                     x=alt.X('Mês:O', sort=list(meses_nomes.values())),
-                                    y=alt.Y('media:Q'),
+                                    y=alt.Y('media:Q', title='GPD (kg/dia)', axis=alt.Axis(orient='right')),
                                     tooltip=[
                                         alt.Tooltip('Mês:O'),
                                         alt.Tooltip('media:Q', format='.3f', title='Média'),
@@ -2291,7 +2303,7 @@ def main():
                                     color='#059669', size=60
                                 ).encode(
                                     x=alt.X('Mês:O', sort=list(meses_nomes.values())),
-                                    y='media:Q'
+                                    y=alt.Y('media:Q', axis=alt.Axis(orient='right'))
                                 )
                                 
                                 # Linha da Mediana
@@ -2299,7 +2311,7 @@ def main():
                                     color='#be185d', strokeWidth=2, strokeDash=[6, 3]
                                 ).encode(
                                     x=alt.X('Mês:O', sort=list(meses_nomes.values())),
-                                    y=alt.Y('mediana:Q'),
+                                    y=alt.Y('mediana:Q', axis=alt.Axis(orient='right')),
                                     tooltip=[
                                         alt.Tooltip('Mês:O'),
                                         alt.Tooltip('mediana:Q', format='.3f', title='Mediana')
@@ -2310,10 +2322,10 @@ def main():
                                     color='#be185d', size=40
                                 ).encode(
                                     x=alt.X('Mês:O', sort=list(meses_nomes.values())),
-                                    y='mediana:Q'
+                                    y=alt.Y('mediana:Q', axis=alt.Axis(orient='right'))
                                 )
                                 
-                                # Barras de contagem (eixo secundário simulado com opacidade leve)
+                                # Barras de contagem (eixo principal - esquerda)
                                 bars_qtd = alt.Chart(stats).mark_bar(
                                     color='#94a3b8', opacity=0.2
                                 ).encode(
@@ -2325,9 +2337,14 @@ def main():
                                     ]
                                 )
                                 
+                                # Grupo de estatísticas GPD (compartilham a mesma escala à direita)
+                                gpd_stats_layer = alt.layer(
+                                    area, line_media, points_media, line_mediana, points_mediana
+                                )
+
                                 # Compor o gráfico final
                                 gpd_chart = alt.layer(
-                                    bars_qtd, area, line_media, points_media, line_mediana, points_mediana
+                                    bars_qtd, gpd_stats_layer
                                 ).resolve_scale(
                                     y='independent'
                                 ).properties(
