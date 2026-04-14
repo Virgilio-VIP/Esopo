@@ -743,11 +743,32 @@ script_dir = os.path.dirname(os.path.abspath(__file__))
 env_path = os.path.join(script_dir, '..', '.env')
 load_dotenv(dotenv_path=env_path)
 
+def resolve_odbc_driver():
+    configured_driver = os.getenv('DB_DRIVER')
+    if configured_driver:
+        return configured_driver
+
+    installed = set(pyodbc.drivers())
+    for driver_name in ("ODBC Driver 18 for SQL Server", "ODBC Driver 17 for SQL Server"):
+        if driver_name in installed:
+            return f"{{{driver_name}}}"
+
+    raise RuntimeError(
+        "Nenhum driver ODBC SQL Server encontrado. Instale 'ODBC Driver 18 for SQL Server' "
+        "ou configure DB_DRIVER no arquivo .env."
+    )
+
 def get_connection():
-    return pyodbc.connect(f"DRIVER={os.getenv('DB_DRIVER')};SERVER={os.getenv('DB_SERVER')};DATABASE={os.getenv('DB_DATABASE')};UID={os.getenv('DB_USERNAME')};PWD={os.getenv('DB_PASSWORD')}")
+    return pyodbc.connect(
+        f"DRIVER={resolve_odbc_driver()};SERVER={os.getenv('DB_SERVER')};DATABASE={os.getenv('DB_DATABASE')};"
+        f"UID={os.getenv('DB_USERNAME')};PWD={os.getenv('DB_PASSWORD')};Encrypt=yes;TrustServerCertificate=yes"
+    )
 
 def get_vipper_connection():
-    return pyodbc.connect(f"DRIVER={os.getenv('DB_DRIVER')};SERVER={os.getenv('DB_SERVER')};DATABASE=Vipper_KNW;UID={os.getenv('DB_USERNAME')};PWD={os.getenv('DB_PASSWORD')}")
+    return pyodbc.connect(
+        f"DRIVER={resolve_odbc_driver()};SERVER={os.getenv('DB_SERVER')};DATABASE=Vipper_KNW;"
+        f"UID={os.getenv('DB_USERNAME')};PWD={os.getenv('DB_PASSWORD')};Encrypt=yes;TrustServerCertificate=yes"
+    )
 
 def format_br(val):
     if val is None: return "0,00"
