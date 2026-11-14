@@ -10,21 +10,43 @@ echo.
 
 cd /d "%~dp0"
 
-if not exist .venv\Scripts\activate.bat (
-    echo  [ERRO] Ambiente virtual nao encontrado!
-    echo  Execute primeiro: python -m venv .venv
-    echo  Depois: .venv\Scripts\pip install -r requirements.txt
+set "PYTHON=python"
+where python >nul 2>&1
+if errorlevel 1 (
+    echo  [ERRO] Python nao encontrado no PATH.
+    echo  Instale o Python 3 e tente novamente.
     pause
     exit /b 1
 )
 
-call .venv\Scripts\activate.bat
+if not exist .venv\Scripts\python.exe (
+    echo  Ambiente virtual nao encontrado. Criando .venv...
+    %PYTHON% -m venv .venv
+    if errorlevel 1 (
+        echo  [ERRO] Falha ao criar o ambiente virtual.
+        pause
+        exit /b 1
+    )
+)
 
-echo  Ambiente virtual ativado.
+set "VENV_PY=.venv\Scripts\python.exe"
+set "VENV_PIP=.venv\Scripts\pip.exe"
+
+echo  Verificando dependencias...
+"%VENV_PY%" -m pip install -q -r requirements.txt
+if errorlevel 1 (
+    echo  [ERRO] Falha ao instalar dependencias.
+    pause
+    exit /b 1
+)
+
+echo  Ambiente virtual pronto.
 echo  Abrindo no navegador em 3 segundos...
 echo.
 echo  Acesse: http://localhost:8501
 echo  Para encerrar: pressione Ctrl+C nesta janela
 echo.
 
-streamlit run execution\dashboard.py --server.port 8501
+start "" cmd /c "timeout /t 3 /nobreak >nul && start http://localhost:8501"
+
+"%VENV_PY%" -m streamlit run execution\dashboard.py --server.port 8501 --server.headless true

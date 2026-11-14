@@ -719,6 +719,9 @@ st.markdown("""
     section[data-testid="stSidebar"] button[data-nav="calendario"]::before {
         content: 'calendar_month' !important;
     }
+    section[data-testid="stSidebar"] button[data-nav="mapa"]::before {
+        content: 'map' !important;
+    }
     /* Fallback: default icon if data-nav not yet set */
     section[data-testid="stSidebar"] .stButton > button:not([data-nav])::before {
         content: 'radio_button_unchecked';
@@ -741,7 +744,7 @@ st.markdown("""
 # Load environment
 script_dir = os.path.dirname(os.path.abspath(__file__))
 env_path = os.path.join(script_dir, '..', '.env')
-load_dotenv(dotenv_path=env_path)
+load_dotenv(dotenv_path=env_path, override=True)
 
 def get_connection():
     return pyodbc.connect(f"DRIVER={os.getenv('DB_DRIVER')};SERVER={os.getenv('DB_SERVER')};DATABASE={os.getenv('DB_DATABASE')};UID={os.getenv('DB_USERNAME')};PWD={os.getenv('DB_PASSWORD')}")
@@ -882,6 +885,7 @@ def main():
         {"key": "ficha",     "icon": "inventory_2",  "label": "Ficha de Animais", "desc": "Giro de estoque"},
         {"key": "planejamento", "icon": "calculate", "label": "Planejamento",    "desc": "Simulação financeira"},
         {"key": "calendario",   "icon": "calendar_month", "label": "Calendário",  "desc": "Atividades e eventos"},
+        {"key": "mapa",         "icon": "map",            "label": "Mapa",        "desc": "Áreas e rebanho"},
     ]
     
     # --- SIDEBAR — Premium Brand ---
@@ -933,7 +937,8 @@ def main():
                 'Evolu': 'peso',
                 'Ficha': 'ficha',
                 'Planejamento': 'planejamento',
-                'Calend': 'calendario'
+                'Calend': 'calendario',
+                'Mapa': 'mapa'
             };
             buttons.forEach(btn => {
                 const text = btn.textContent || '';
@@ -991,6 +996,7 @@ def main():
         "ficha": "📋 Ficha de Animais",
         "planejamento": "📐 Planejamento",
         "calendario": "📅 Calendário",
+        "mapa": "🗺️ Mapa",
     }
     page = page_map[st.session_state.current_page]
 
@@ -1001,6 +1007,7 @@ def main():
         "📋 Ficha de Animais": ("inventory_2", "icon-amber", "Movimentação e giro de estoque"),
         "📐 Planejamento": ("calculate", "icon-green", "Simulação financeira de evolução do rebanho"),
         "📅 Calendário": ("calendar_month", "icon-green", "Calendário de atividades e eventos do rebanho"),
+        "🗺️ Mapa": ("map", "icon-green", "Áreas do KML, animais e biomassa"),
     }
     icon_name, icon_class, subtitle = page_icons.get(page, ("info", "icon-green", ""))
     clean_title = page.split(" ", 1)[1] if " " in page else page
@@ -2819,6 +2826,10 @@ def main():
                 st.dataframe(df_grid, use_container_width=True, hide_index=True)
             else:
                 st.info(f"📊 Sem dados para gerar gráficos em {month_name} de {cal_year}.")
+
+        elif page == "🗺️ Mapa":
+            from mapa import render_mapa
+            render_mapa(conn, df_all_farms, selected_codes)
 
     except Exception as e:
         st.error(f"❌ Erro: {e}")
