@@ -2,14 +2,20 @@
 
 from __future__ import annotations
 
+import base64
 import html
 import json
 import os
 
 import folium
 import pandas as pd
+import plotly.graph_objects as go
+from branca.element import MacroElement
+from jinja2 import Template
+from plotly.subplots import make_subplots
 import streamlit as st
 from folium.plugins import Draw, Fullscreen
+from folium.raster_layers import ImageOverlay
 from pyproj import Geod
 from shapely.geometry import LineString, Point, mapping, shape
 from streamlit_folium import st_folium
@@ -25,6 +31,83 @@ _SITUACAO = {
     "vinculada": "vinculada — travada",
 }
 _GEOD = Geod(ellps="WGS84")
+
+
+class _RotulosPorZoom(MacroElement):
+    """Tamanho do código cresce de forma contínua com o zoom."""
+
+    _template = Template(
+        """
+    {% macro script(this, kwargs) %}
+    var map = {{this._parent.get_name()}};
+    function atualizaRotulosEsopo() {
+        var z = map.getZoom();
+        document.querySelectorAll('.esopo-mapa-rotulo').forEach(function(el) {
+            var cod = el.querySelector('.rotulo-cod');
+            var desc = el.querySelector('.rotulo-desc');
+            if (z < 13) {
+                el.style.visibility = 'hidden';
+                return;
+            }
+            el.style.visibility = 'visible';
+            var px = Math.round(Math.max(12, Math.min(18, 12 + (z - 13) * 1.5)));
+            if (cod) cod.style.fontSize = px + 'px';
+            if (desc) {
+                if (z < 15) {
+                    desc.style.display = 'none';
+                } else {
+                    desc.style.display = 'block';
+                    desc.style.fontSize = Math.max(9, Math.round(px * 0.62)) + 'px';
+                }
+            }
+        });
+    }
+    map.on('zoom zoomend', atualizaRotulosEsopo);
+    map.whenReady(atualizaRotulosEsopo);
+    {% endmacro %}
+    """
+    )
+
+
+def _timelapse_play_ligar(cod_fazenda: int) -> None:
+    st.session_state[f"timelapse_play_{cod_fazenda}"] = True
+
+
+def _timelapse_play_pausar(cod_fazenda: int) -> None:
+    st.session_state[f"timelapse_play_{cod_fazenda}"] = False
+
+
+def _autoplay_tick(cod_fazenda: int, limite: int) -> None:
+    """Avança o mês só no timer do fragmento, sem recriar o mapa neste passo."""
+    from streamlit.runtime.scriptrunner_utils.script_run_context import get_script_run_ctx
+
+    ctx = get_script_run_ctx()
+    if ctx is None or not ctx.fragment_ids_this_run:
+        return
+    if not st.session_state.get(f"timelapse_play_{cod_fazenda}"):
+        return
+    idx_key = f"timelapse_idx_{cod_fazenda}"
+    atual = int(st.session_state.get(idx_key, 0))
+    st.session_state[idx_key] = 0 if atual >= int(limite) else atual + 1
+    st.rerun(scope="app")
+
+
+def _velocimetro_timelapse(segundos: float) -> None:
+    segundos = max(0.25, min(8.0, float(segundos)))
+    angulo = 120 - 240 * (segundos - 0.25) / 7.75
+    st.markdown(
+        f"""<div style="max-width:220px;margin:0 auto;text-align:center;">
+        <svg viewBox="0 0 200 110" width="100%" height="88" aria-label="Velocidade da reprodução">
+          <path d="M 25 95 A 75 75 0 0 1 175 95" fill="none" stroke="#cbd5e1" stroke-width="10" stroke-linecap="round"/>
+          <g transform="translate(100,95) rotate({angulo})">
+            <line x1="0" y1="0" x2="0" y2="-62" stroke="#0f172a" stroke-width="3" stroke-linecap="round"/>
+            <circle r="5" fill="#ea580c"/>
+          </g>
+          <text x="100" y="108" text-anchor="middle" font-size="11" fill="#475569">1 quadro a cada {segundos:.2f} s</text>
+        </svg>
+        </div>""",
+        unsafe_allow_html=True,
+    )
 
 
 def render_mapa(conn, df_farms: pd.DataFrame, selected_codes: list):
@@ -52,6 +135,8 @@ def render_mapa(conn, df_farms: pd.DataFrame, selected_codes: list):
         key="mapa_fazenda",
     )
 
+    st.caption("Mapa · versão 20/nov/2025 — timelapse, UA/ha, pressão % e gráficos mensais")
+
     tab_mapa, tab_importar = st.tabs(["Mapa", "Importar KML"])
     with tab_mapa:
         _mapa_interativo(conn, store, int(cod_fazenda))
@@ -59,9 +144,504 @@ def render_mapa(conn, df_farms: pd.DataFrame, selected_codes: list):
         _importar(conn, store, int(cod_fazenda))
 
 
+_RAMPA_ACIMA = (
+    (0.0, (228, 208, 148)),
+    (0.5, (134, 239, 172)),
+    (1.0, (20, 83, 45)),
+)
+_RAMPA_ABAIXO = (
+    (0.0, (194, 65, 12)),
+    (1.0, (228, 208, 148)),
+)
+_CINZA_SEM_ANIMAL = "#cbd5e1"
+_ESPECTRO_TEMPO = (
+    (0.0, "#1e3a8a"),
+    (0.17, "#14532d"),
+    (0.33, "#86efac"),
+    (0.5, "#facc15"),
+    (0.67, "#ea580c"),
+    (0.83, "#c2410c"),
+    (1.0, "#dc2626"),
+)
+_LIMITES_TEMPO_PADRAO = {
+    "biomassa": [
+        {"classe": "Crítica", "maximo": 0.5},
+        {"classe": "Baixa", "maximo": 1.0},
+        {"classe": "Moderada", "maximo": 2.0},
+        {"classe": "Boa", "maximo": 3.0},
+        {"classe": "Alta", "maximo": 999.0},
+    ],
+    "carga": [
+        {"classe": "Esparsa", "maximo": 0.5},
+        {"classe": "Moderada", "maximo": 0.8},
+        {"classe": "Cheia", "maximo": 1.0},
+        {"classe": "Intensa", "maximo": 999.0},
+    ],
+    "ua_ha": [
+        {"classe": "Baixa", "maximo": 0.5},
+        {"classe": "Moderada", "maximo": 0.8},
+        {"classe": "Alta", "maximo": 1.2},
+        {"classe": "Muito alta", "maximo": 999.0},
+    ],
+    "pressao_pct": [
+        {"classe": "Leve", "maximo": 15.0},
+        {"classe": "Moderada", "maximo": 35.0},
+        {"classe": "Forte", "maximo": 60.0},
+        {"classe": "Crítica", "maximo": 999.0},
+    ],
+}
+
+
+def _cor_espectro(t: float) -> str:
+    t = max(0.0, min(1.0, float(t)))
+    for i in range(len(_ESPECTRO_TEMPO) - 1):
+        t0, c0 = _ESPECTRO_TEMPO[i]
+        t1, c1 = _ESPECTRO_TEMPO[i + 1]
+        if t <= t1 or i == len(_ESPECTRO_TEMPO) - 2:
+            peso = 0.0 if t1 == t0 else (t - t0) / (t1 - t0)
+            return _mistura_hex(c0, c1, peso)
+    return _ESPECTRO_TEMPO[-1][1]
+
+
+def _mistura_hex(c0: str, c1: str, peso: float) -> str:
+    def par(hex_cor):
+        hex_cor = hex_cor.lstrip("#")
+        return tuple(int(hex_cor[i : i + 2], 16) for i in (0, 2, 4))
+
+    a, b = par(c0), par(c1)
+    rgb = tuple(round(x + (y - x) * peso) for x, y in zip(a, b))
+    return "#{:02x}{:02x}{:02x}".format(*rgb)
+
+
+def _limites_timelapse(cod_fazenda: int, criterio: str) -> pd.DataFrame:
+    chave = f"limites_tempo_{criterio}_{cod_fazenda}"
+    if chave not in st.session_state:
+        st.session_state[chave] = pd.DataFrame(_LIMITES_TEMPO_PADRAO[criterio])
+    return st.session_state[chave]
+
+
+def _indice_classe(valor, limites: pd.DataFrame) -> int:
+    if valor is None or pd.isna(valor) or limites is None or limites.empty:
+        return 0
+    for indice, row in limites.sort_values("maximo").iterrows():
+        if float(valor) <= float(row.maximo):
+            return int(indice)
+    return len(limites) - 1
+
+
+def _cor_por_classe(valor, limites: pd.DataFrame | None) -> str:
+    if limites is None or limites.empty:
+        return "#475569"
+    n = len(limites)
+    if n <= 1:
+        return _cor_espectro(0.5)
+    classe = _indice_classe(valor, limites)
+    return _cor_espectro(classe / max(n - 1, 1))
+
+
+def _cartao_indicador(titulo: str, valor, unidade: str, limites: pd.DataFrame | None, casas: int = 2):
+    texto = "—" if valor is None or pd.isna(valor) else _numero(valor, casas)
+    cor = _cor_por_classe(valor, limites)
+    fundo = _mistura_hex(cor, "#0f172a", 0.72)
+    st.markdown(
+        f"""<div style="background:{fundo};border:2px solid {cor};border-radius:12px;padding:14px 10px;text-align:center;">
+        <div style="color:#e2e8f0;font-size:12px;font-weight:600;">{html.escape(titulo)}</div>
+        <div style="color:#fff;font-size:26px;font-weight:700;line-height:1.1;">{texto}</div>
+        <div style="color:#cbd5e1;font-size:11px;">{html.escape(unidade)}</div>
+        </div>""",
+        unsafe_allow_html=True,
+    )
+
+
+def _criterio_mapa(cod_fazenda: int) -> str:
+    chave = f"mapa_criterio_{cod_fazenda}"
+    atual = st.session_state.get(chave, "UA/ha")
+    st.markdown("**Critério que colore a camada Animais**")
+    ua, gpd, _resto = st.columns([1, 1, 3])
+    if ua.button(
+        "UA/ha",
+        key=f"btn_ua_{cod_fazenda}",
+        type="primary" if atual == "UA/ha" else "secondary",
+        use_container_width=True,
+    ):
+        st.session_state[chave] = "UA/ha"
+        if atual != "UA/ha":
+            st.rerun()
+    if gpd.button(
+        "GPD",
+        key=f"btn_gpd_{cod_fazenda}",
+        type="primary" if atual == "GPD" else "secondary",
+        use_container_width=True,
+    ):
+        st.session_state[chave] = "GPD"
+        if atual != "GPD":
+            st.rerun()
+    return st.session_state.get(chave, "UA/ha")
+
+
+def _mistura(rampa, t: float) -> str:
+    t = max(0.0, min(1.0, t))
+    for i in range(len(rampa) - 1):
+        t0, cor0 = rampa[i]
+        t1, cor1 = rampa[i + 1]
+        if t <= t1 or i == len(rampa) - 2:
+            peso = 0.0 if t1 == t0 else (t - t0) / (t1 - t0)
+            rgb = tuple(round(a + (b - a) * peso) for a, b in zip(cor0, cor1))
+            return "#{:02x}{:02x}{:02x}".format(*rgb)
+    return "#14532d"
+
+
+def _hex_indice(valor, baixo, media, alto) -> str:
+    if valor is None or pd.isna(valor) or baixo is None or media is None or alto is None:
+        return _CINZA_SEM_ANIMAL
+    valor = float(valor)
+    if alto <= baixo:
+        return _mistura(_RAMPA_ACIMA, 1.0)
+    if valor >= media:
+        faixa = alto - media
+        t = 1.0 if faixa <= 0 else (valor - media) / faixa
+        return _mistura(_RAMPA_ACIMA, t)
+    faixa = media - baixo
+    t = 0.0 if faixa <= 0 else (valor - baixo) / faixa
+    return _mistura(_RAMPA_ABAIXO, t)
+
+
+def _faixa(serie: pd.Series):
+    valores = [float(v) for v in serie.dropna()]
+    if not valores:
+        return None, None, None
+    return min(valores), sum(valores) / len(valores), max(valores)
+
+
+def _indices(conn, cod_fazenda: int) -> pd.DataFrame:
+    return pd.read_sql(
+        """
+        WITH Ultima AS (
+            SELECT cod_animal, peso, data, GPD,
+                   ROW_NUMBER() OVER (PARTITION BY cod_animal ORDER BY data DESC) AS rn
+            FROM cad_pesagem_corte
+        )
+        SELECT
+            RTRIM(c.Cod_Local) AS cod_local,
+            COUNT(*) AS cabecas,
+            SUM(CASE WHEN u.peso IS NOT NULL THEN 1 ELSE 0 END) AS pesados,
+            AVG(CAST(u.peso AS float)) AS peso_medio,
+            SUM(CAST(u.peso AS float)) AS peso_total,
+            AVG(CAST(u.GPD AS float)) AS gpd,
+            AVG(CAST(DATEDIFF(day, u.data, GETDATE()) AS float)) AS dias
+        FROM cad_fichario c
+        LEFT JOIN Ultima u ON c.cod_animal = u.cod_animal AND u.rn = 1
+        WHERE c.Cod_Fazenda = ?
+          AND c.Origem <> 'E'
+          AND c.Cod_Categoria NOT IN (
+              SELECT Cod_Categoria FROM Tab_categoria WHERE morto = 'S' OR vendido = 'S'
+          )
+        GROUP BY RTRIM(c.Cod_Local)
+        """,
+        conn,
+        params=[int(cod_fazenda)],
+    )
+
+
+def _quadro_indices(areas: list[dict], por_id: dict, indices: pd.DataFrame) -> pd.DataFrame:
+    por_cod = {}
+    if indices is not None and not indices.empty:
+        for row in indices.itertuples(index=False):
+            por_cod[str(row.cod_local).strip()] = row
+    linhas = []
+    for area in areas:
+        local = por_id.get(int(area["id"]))
+        if local is None:
+            continue
+        codigo = str(local.cod_local).strip()
+        info = por_cod.get(codigo)
+        ha = float(area["area_ha"] or 0)
+        cabecas = int(info.cabecas) if info is not None else 0
+        peso_medio = None if info is None or pd.isna(info.peso_medio) else float(info.peso_medio)
+        peso_total = None if info is None or pd.isna(info.peso_total) else float(info.peso_total)
+        gpd = None if info is None or pd.isna(info.gpd) else float(info.gpd)
+        dias = None if info is None or pd.isna(info.dias) else int(round(float(info.dias)))
+        ua_ha = (peso_total / 450.0) / ha if peso_total is not None and ha > 0 else None
+        linhas.append(
+            {
+                "geo_id": int(area["id"]),
+                "cod_local": codigo,
+                "local": f"{codigo} — {local.descricao}",
+                "ha": round(ha, 2),
+                "cabecas": cabecas,
+                "peso_medio": None if peso_medio is None else round(peso_medio, 1),
+                "peso_total": None if peso_total is None else round(peso_total, 1),
+                "dias": dias,
+                "gpd": None if gpd is None else round(gpd, 3),
+                "ua_ha": None if ua_ha is None else round(ua_ha, 3),
+            }
+        )
+    return pd.DataFrame(linhas)
+
+
+def _preparar_timelapse(conn, cod_fazenda: int, areas: list[dict]) -> tuple[pd.DataFrame | None, tuple[bytes, ...] | None, str | None]:
+    """Série mensal e JPEGs do vídeo, sem depender do Folium."""
+    if int(cod_fazenda) != 4:
+        return None, None, None
+    from gis.timelapse import arquivo_timelapse, envelope, quadros_jpeg, serie_fazenda
+
+    video = arquivo_timelapse()
+    if video is None:
+        return None, None, "Não encontrei `KML/Tailandia.mp4`."
+    if envelope(areas) is None:
+        return None, None, "O mapa ainda não tem áreas para encaixar o vídeo."
+    try:
+        mtime = os.path.getmtime(video)
+        hectares = round(sum(float(area.get("area_ha") or 0) for area in areas), 2)
+        chave_serie = f"timelapse_serie_v2_{cod_fazenda}"
+        if st.session_state.get(f"{chave_serie}_ha") != hectares or chave_serie not in st.session_state:
+            st.session_state[chave_serie] = serie_fazenda(conn, cod_fazenda, hectares)
+            st.session_state[f"{chave_serie}_ha"] = hectares
+        serie = st.session_state[chave_serie]
+
+        chave_img = f"timelapse_img_{cod_fazenda}"
+        if st.session_state.get(f"{chave_img}_mtime") != mtime:
+            st.session_state[chave_img] = quadros_jpeg(video, mtime)
+            st.session_state[f"{chave_img}_mtime"] = mtime
+        imagens = st.session_state[chave_img]
+        return serie, imagens, None
+    except Exception as exc:
+        return None, None, str(exc)
+
+
+def _url_quadro(imagens: tuple[bytes, ...], indice: int) -> str:
+    indice = max(0, min(int(indice), len(imagens) - 1))
+    return "data:image/jpeg;base64," + base64.b64encode(imagens[indice]).decode("ascii")
+
+
+def _timelapse_na_camada(mapa, areas, imagens: tuple[bytes, ...] | None, indice: int):
+    """ImageOverlay da camada Timelapse, o mesmo encaixe do controle do mapa."""
+    if not imagens:
+        return
+    from gis.timelapse import bounds_painel, envelope
+
+    caixa = envelope(areas)
+    if caixa is None:
+        return
+    west, south, east, north = caixa
+    grupo = folium.FeatureGroup(name="Timelapse", show=True)
+    ImageOverlay(
+        _url_quadro(imagens, indice),
+        bounds=bounds_painel(west, south, east, north),
+        opacity=0.9,
+        interactive=False,
+        cross_origin=False,
+        zindex=1,
+    ).add_to(grupo)
+    grupo.add_to(mapa)
+
+
+def _grafico_timelapse(serie: pd.DataFrame):
+    fig = make_subplots(
+        rows=2,
+        cols=2,
+        shared_xaxes=True,
+        vertical_spacing=0.12,
+        horizontal_spacing=0.08,
+        subplot_titles=("Biomassa (t MS/ha)", "Carga (cab/ha)", "UA/ha", "Pressão de pastejo (%)"),
+    )
+    meses = serie["mes"].tolist()
+    fig.add_trace(
+        go.Scatter(x=meses, y=serie["biomassa"], mode="lines+markers", fill="tozeroy", name="Biomassa", line=dict(color="#1e3a8a")),
+        row=1,
+        col=1,
+    )
+    fig.add_trace(go.Scatter(x=meses, y=serie["carga"], mode="lines+markers", name="Carga", line=dict(color="#14532d")), row=1, col=2)
+    fig.add_trace(go.Scatter(x=meses, y=serie["ua_ha"], mode="lines+markers", name="UA/ha", line=dict(color="#86efac")), row=2, col=1)
+    fig.add_trace(
+        go.Scatter(x=meses, y=serie["pressao_pct"], mode="lines+markers", name="Pressão", line=dict(color="#ea580c")),
+        row=2,
+        col=2,
+    )
+    fig.update_layout(
+        height=460,
+        margin=dict(l=24, r=16, t=40, b=80),
+        showlegend=False,
+        paper_bgcolor="rgba(0,0,0,0)",
+        plot_bgcolor="rgba(15,23,42,0.03)",
+    )
+    fig.update_xaxes(tickangle=-35, row=2, col=1)
+    fig.update_xaxes(tickangle=-35, row=2, col=2)
+    st.plotly_chart(fig, use_container_width=True)
+
+
+def _timelapse_mes_menos(chave_idx: str) -> None:
+    st.session_state[chave_idx] = max(0, int(st.session_state.get(chave_idx, 0)) - 1)
+
+
+def _timelapse_mes_mais(chave_idx: str, limite: int) -> None:
+    st.session_state[chave_idx] = min(limite, int(st.session_state.get(chave_idx, 0)) + 1)
+
+
+def _painel_timelapse(serie: pd.DataFrame, cod_fazenda: int):
+    if serie is None or serie.empty:
+        return
+    idx_key = f"timelapse_idx_{cod_fazenda}"
+    limite = len(serie) - 1
+    if idx_key not in st.session_state:
+        st.session_state[idx_key] = 0
+
+    play_key = f"timelapse_play_{cod_fazenda}"
+    vel_key = f"timelapse_vel_{cod_fazenda}"
+    if play_key not in st.session_state:
+        st.session_state[play_key] = False
+    if vel_key not in st.session_state:
+        st.session_state[vel_key] = 2.0
+
+    st.markdown(
+        """<div style="background:linear-gradient(90deg,#0f172a,#14532d);color:#f8fafc;padding:14px 18px;border-radius:12px;margin:8px 0 12px;">
+        <div style="font-size:18px;font-weight:700;">Pasture Watch · Timelapse</div>
+        <div style="font-size:12px;opacity:0.9;">Jan/2025 a Ago/2026 · o mês escolhido aqui atualiza o quadro no mapa acima</div>
+        </div>""",
+        unsafe_allow_html=True,
+    )
+    c_play, c_pause, c_vel, c_gauge = st.columns([1, 1, 2.2, 1.2])
+    with c_play:
+        st.button(
+            "Reproduzir",
+            key=f"tempo_play_{cod_fazenda}",
+            use_container_width=True,
+            on_click=_timelapse_play_ligar,
+            args=(cod_fazenda,),
+        )
+    with c_pause:
+        st.button(
+            "Pausar",
+            key=f"tempo_pause_{cod_fazenda}",
+            use_container_width=True,
+            on_click=_timelapse_play_pausar,
+            args=(cod_fazenda,),
+        )
+    estado = "Reproduzindo" if st.session_state[play_key] else "Pausado"
+    st.caption(f"**{estado}.** ◀ e ▶ trocam o mês na hora. Reproduzir segue sozinho no intervalo ao lado.")
+    with c_vel:
+        st.slider(
+            "Intervalo entre quadros (segundos)",
+            min_value=0.25,
+            max_value=8.0,
+            step=0.25,
+            key=vel_key,
+            help="Quanto menor o intervalo, mais rápida a animação.",
+        )
+    with c_gauge:
+        _velocimetro_timelapse(st.session_state[vel_key])
+
+    c_prev, c_slider, c_next = st.columns([0.6, 6.4, 0.6])
+    with c_prev:
+        st.button(
+            "◀",
+            key=f"tempo_prev_{cod_fazenda}",
+            use_container_width=True,
+            on_click=_timelapse_mes_menos,
+            args=(idx_key,),
+        )
+    with c_slider:
+        st.slider(
+            "Mês do timelapse",
+            min_value=0,
+            max_value=limite,
+            format="%d",
+            key=idx_key,
+            label_visibility="collapsed",
+        )
+    with c_next:
+        st.button(
+            "▶",
+            key=f"tempo_next_{cod_fazenda}",
+            use_container_width=True,
+            on_click=_timelapse_mes_mais,
+            args=(idx_key, limite),
+        )
+
+    linha = serie.iloc[int(st.session_state[idx_key])]
+    st.markdown(f"**{linha['mes']}** · mês {int(st.session_state[idx_key]) + 1} de {len(serie)}")
+    if int(linha.get("sem_peso", 0)) > 0:
+        st.caption(
+            f"Pressão e @ usam só as **{int(linha.com_peso)}** cabeças com pesagem até o dia 1º "
+            f"({int(linha.sem_peso)} sem peso não entram no peso total)."
+        )
+
+    limites_bio = _limites_timelapse(cod_fazenda, "biomassa")
+    limites_carga = _limites_timelapse(cod_fazenda, "carga")
+    limites_ua = _limites_timelapse(cod_fazenda, "ua_ha")
+    limites_pressao = _limites_timelapse(cod_fazenda, "pressao_pct")
+
+    r1 = st.columns(6)
+    with r1[0]:
+        _cartao_indicador("Biomassa média", linha.biomassa, "t MS / ha", limites_bio, 2)
+    with r1[1]:
+        _cartao_indicador("Cabeças", linha.cabecas, "animais ativos", None, 0)
+    with r1[2]:
+        _cartao_indicador("Total UA", linha.ua, "unidades", None, 2)
+    with r1[3]:
+        _cartao_indicador("Carga", linha.carga, "cab / ha", limites_carga, 2)
+    with r1[4]:
+        _cartao_indicador("UA/ha", linha.ua_ha, "UA / ha", limites_ua, 3)
+    with r1[5]:
+        _cartao_indicador("Pressão", linha.pressao_pct, "% do estoque MS", limites_pressao, 1)
+
+    r2 = st.columns(1)
+    with r2[0]:
+        _cartao_indicador("Peso total", linha.arrobas, "@ (peso ÷ 30)", None, 1)
+
+    st.caption(
+        "Pressão (%) = peso total (kg) ÷ biomassa seca estimada (t MS/ha × ha × 1000) × 100. "
+        "UA vem de Tab_categoria.Unidade_Animal por animal presente no mês."
+    )
+
+    st.markdown("**Faixas de cor dos indicadores** — ajuste os tetos de cada classe")
+    faixas = st.columns(4)
+    defs = [
+        ("biomassa", "t MS/ha", faixas[0]),
+        ("carga", "cab/ha", faixas[1]),
+        ("ua_ha", "UA/ha", faixas[2]),
+        ("pressao_pct", "% pressão", faixas[3]),
+    ]
+    for chave, rotulo, coluna in defs:
+        with coluna:
+            st.caption(rotulo)
+            chave_sessao = f"limites_tempo_{chave}_{cod_fazenda}"
+            editado = st.data_editor(
+                _limites_timelapse(cod_fazenda, chave),
+                key=f"editor_limites_{chave}_{cod_fazenda}",
+                hide_index=True,
+                use_container_width=True,
+                column_config={
+                    "classe": st.column_config.TextColumn("Classe"),
+                    "maximo": st.column_config.NumberColumn("Até", format="%.2f"),
+                },
+            )
+            st.session_state[chave_sessao] = editado
+            teto = float(editado["maximo"].max() or 1)
+            preview = "".join(
+                f'<span style="display:inline-block;width:14%;height:10px;background:{_cor_por_classe(teto * t, editado)}"></span>'
+                for t in (0.15, 0.35, 0.55, 0.75, 0.95)
+            )
+            st.markdown(f'<div style="border-radius:6px;overflow:hidden;">{preview}</div>', unsafe_allow_html=True)
+
+    st.markdown("**Série mensal**")
+    _grafico_timelapse(serie)
+
+
 def _mapa_interativo(conn, store, cod_fazenda: int):
     areas = store.areas(cod_fazenda)
     lines = store.lines(cod_fazenda)
+    perimetro = None
+    perimetro_id = None
+    from gis.timelapse import perimetro_pastos
+
+    uniao = perimetro_pastos(areas)
+    if uniao is not None:
+        perimetro, hectares_perimetro = uniao
+        try:
+            perimetro_id = store.salvar_perimetro(cod_fazenda, perimetro, hectares_perimetro)
+        except Exception as exc:
+            st.caption(f"Não gravei o perímetro da fazenda: {exc}")
     if not areas:
         st.info("Esta fazenda ainda não tem áreas importadas. Use a aba Importar KML.")
         return
@@ -69,6 +649,21 @@ def _mapa_interativo(conn, store, cod_fazenda: int):
     locais = _locais(conn, cod_fazenda)
     por_id = {int(row.id_geo_area): row for row in locais.itertuples(index=False) if pd.notna(row.id_geo_area)}
     contagem = _contagem(conn, cod_fazenda)
+    criterio = _criterio_mapa(cod_fazenda)
+    quadro = _quadro_indices(areas, por_id, _indices(conn, cod_fazenda))
+    st.session_state[f"mapa_indices_{cod_fazenda}"] = quadro.to_dict("records")
+    coluna = "ua_ha" if criterio == "UA/ha" else "gpd"
+    com_animal = quadro[quadro["cabecas"] > 0] if not quadro.empty else quadro
+    baixo, media, alto = _faixa(com_animal[coluna]) if not com_animal.empty else (None, None, None)
+    cor_por_area = {}
+    if not quadro.empty:
+        for row in quadro.itertuples(index=False):
+            valor = getattr(row, coluna)
+            if row.cabecas <= 0 or valor is None or pd.isna(valor):
+                cor_por_area[int(row.geo_id)] = _CINZA_SEM_ANIMAL
+            else:
+                cor_por_area[int(row.geo_id)] = _hex_indice(valor, baixo, media, alto)
+    por_geo = {} if quadro.empty else {int(row.geo_id): row for row in quadro.itertuples(index=False)}
 
     features_animais = []
     features_biomassa = []
@@ -76,7 +671,8 @@ def _mapa_interativo(conn, store, cod_fazenda: int):
         local = por_id.get(int(area["id"]))
         cod_local = "" if local is None else str(local.cod_local)
         nome = "Sem local vinculado" if local is None else f"{str(local.cod_local).strip()} — {local.descricao}"
-        cabecas = int(contagem.get(cod_local.strip(), 0)) if cod_local else 0
+        info = por_geo.get(int(area["id"]))
+        cabecas = 0 if info is None else int(info.cabecas)
         props = {
             "geo_id": int(area["id"]),
             "nome": nome,
@@ -84,6 +680,11 @@ def _mapa_interativo(conn, store, cod_fazenda: int):
             "area_ha": area["area_ha"],
             "cabecas": cabecas,
             "cod_local": cod_local,
+            "peso_medio": "—" if info is None or info.peso_medio is None else info.peso_medio,
+            "gpd": "—" if info is None or info.gpd is None else info.gpd,
+            "ua_ha": "—" if info is None or info.ua_ha is None else info.ua_ha,
+            "dias": "—" if info is None or info.dias is None else info.dias,
+            "cor": cor_por_area.get(int(area["id"]), _CINZA_SEM_ANIMAL),
         }
         features_animais.append({"type": "Feature", "properties": props, "geometry": area["geojson"]})
         features_biomassa.append(
@@ -94,15 +695,29 @@ def _mapa_interativo(conn, store, cod_fazenda: int):
             }
         )
 
+    serie_tempo = None
+    imagens_tempo = None
+    erro_tempo = None
+    if int(cod_fazenda) == 4:
+        serie_tempo, imagens_tempo, erro_tempo = _preparar_timelapse(conn, cod_fazenda, areas)
+        if f"timelapse_vel_{cod_fazenda}" not in st.session_state:
+            st.session_state[f"timelapse_vel_{cod_fazenda}"] = 2.0
+
     mapa = _base_map(features_animais)
+    indice_tempo = int(st.session_state.get(f"timelapse_idx_{cod_fazenda}", 0))
+    if int(cod_fazenda) == 4 and imagens_tempo:
+        try:
+            _timelapse_na_camada(mapa, areas, imagens_tempo, indice_tempo)
+        except Exception as exc:
+            erro_tempo = erro_tempo or str(exc)
     folium.GeoJson(
         {"type": "FeatureCollection", "features": features_animais},
         name="Animais",
         style_function=_estilo_animais,
         highlight_function=lambda _f: {"weight": 3, "color": "#be185d", "fillOpacity": 0.35},
         tooltip=folium.GeoJsonTooltip(
-            fields=["nome", "area_ha", "cabecas"],
-            aliases=["Local", "Área (ha)", "Animais"],
+            fields=["nome", "area_ha", "cabecas", "peso_medio", "dias", "gpd", "ua_ha"],
+            aliases=["Local", "Área (ha)", "Cabeças", "Peso médio (kg)", "Dias da pesagem", "GPD", "UA/ha"],
             sticky=True,
         ),
     ).add_to(mapa)
@@ -124,21 +739,44 @@ def _mapa_interativo(conn, store, cod_fazenda: int):
         ),
     ).add_to(mapa)
     _linhas_no_mapa(mapa, lines)
+    rotulos = folium.FeatureGroup(name="Rótulos dos locais", show=True)
     for feature in features_animais:
         codigo = str(feature["properties"].get("cod_local") or "").strip()
         if not codigo:
             continue
         ponto = shape(feature["geometry"]).representative_point()
-        _rotulo_no_mapa(mapa, ponto.y, ponto.x, codigo, feature["properties"].get("descricao") or "")
+        _rotulo_no_mapa(rotulos, ponto.y, ponto.x, codigo, feature["properties"].get("descricao") or "")
+    rotulos.add_to(mapa)
+    _RotulosPorZoom().add_to(mapa)
     folium.LayerControl(collapsed=False).add_to(mapa)
 
-    st.markdown(
-        "A camada **Animais** pinta cada área pela quantidade de cabeças ativas do local vinculado. "
-        "A camada **Biomassa** já está no controle do mapa, pronta para receber medição de pasto. "
-        "Para fechar um vão ou traçar uma cerca nova, use **Importar KML**. "
-        "Área já vinculada a um local não se edita: desvincule antes."
-    )
-    clique = _desenhar(mapa, f"mapa-{cod_fazenda}")
+    if media is None:
+        st.caption("Ainda não há pesagem nos pastos com animal. As áreas ficam cinza.")
+    else:
+        texto_media = _numero(media, 3)
+        st.caption(
+            f"Média geral de {criterio}: {texto_media}. "
+            "Verde escuro é o maior índice, palha fica na média e laranja amarronzado é o menor. "
+            "Pasto sem animal ativo permanece cinza."
+        )
+    clique = _desenhar(mapa, f"mapa-folium-{cod_fazenda}")
+    if perimetro_id is not None:
+        st.caption(
+            f"Perímetro externo dos pastos gravado em **Esopo_geo_area**, id **{perimetro_id}** "
+            "(situação `perimetro`). No local Fazenda Tailandia, relacione `Tab_local.id_geo_area` a este id."
+        )
+    if int(cod_fazenda) != 4:
+        st.info("O **Pasture Watch (timelapse)** está liberado na **Fazenda Tailandia (4)**. Escolha essa opção em *Fazenda do mapa*.")
+    elif serie_tempo is not None:
+        st.caption("Ligue a camada **Timelapse** no quadro de camadas do mapa. O mês é o controle abaixo.")
+        _painel_timelapse(serie_tempo, cod_fazenda)
+        st.fragment(
+            _autoplay_tick,
+            run_every=float(st.session_state.get(f"timelapse_vel_{cod_fazenda}", 2.0)),
+        )(cod_fazenda, len(serie_tempo) - 1)
+    elif erro_tempo:
+        st.warning(f"Timelapse indisponível: {erro_tempo}")
+    _tabela_indices(quadro, criterio, media)
     _painel_clique(conn, cod_fazenda, areas, por_id, clique)
 
     vinculados = sum(1 for area in areas if int(area["id"]) in por_id)
@@ -523,12 +1161,15 @@ def _importar(conn, store, cod_fazenda: int):
         style_function=_estilo_ajuste,
         tooltip=folium.GeoJsonTooltip(fields=["nome", "seq", "area_ha", "situacao"], aliases=["Nome", "Área", "ha", "Leitura"]),
     ).add_to(preview)
+    rotulos_prev = folium.FeatureGroup(name="Rótulos dos locais", show=True)
     for poly in prev["polygons"]:
         codigo = (poly.get("cod_local") or poly.get("nome_kml") or "").strip()
         if not codigo:
             continue
         ponto = shape(poly["geojson"]).representative_point()
-        _rotulo_no_mapa(mapa=preview, lat=ponto.y, lon=ponto.x, codigo=codigo, descricao=poly.get("descricao") or "")
+        _rotulo_no_mapa(rotulos_prev, ponto.y, ponto.x, codigo, poly.get("descricao") or "")
+    rotulos_prev.add_to(preview)
+    _RotulosPorZoom().add_to(preview)
     _linhas_no_mapa(preview, prev["lines"], mostrar_vao=True)
     if stats.get("origem") != "poligono":
         Draw(
@@ -873,14 +1514,12 @@ def _base_map(features: list[dict]) -> folium.Map:
         _coleta(feature["geometry"], lons, lats)
     if not lats:
         centro = [-16.02, -43.43]
-        mapa = folium.Map(location=centro, zoom_start=14, tiles=None, max_zoom=22)
+        zoom = 14
     else:
-        mapa = folium.Map(
-            location=[sum(lats) / len(lats), sum(lons) / len(lons)],
-            zoom_start=14,
-            tiles=None,
-            max_zoom=22,
-        )
+        centro = [sum(lats) / len(lats), sum(lons) / len(lons)]
+        zoom = 14
+    mapa = folium.Map(location=list(centro), zoom_start=int(zoom), tiles=None, max_zoom=22)
+    if lats:
         mapa.fit_bounds([[min(lats), min(lons)], [max(lats), max(lons)]])
     folium.TileLayer(
         tiles="https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}",
@@ -904,7 +1543,7 @@ def _base_map(features: list[dict]) -> folium.Map:
     return mapa
 
 
-def _rotulo_no_mapa(mapa, lat: float, lon: float, codigo: str, descricao: str):
+def _rotulo_no_mapa(destino, lat: float, lon: float, codigo: str, descricao: str):
     codigo_html = html.escape(str(codigo).strip())
     descricao_html = html.escape(str(descricao or "").strip())
     folium.Marker(
@@ -914,14 +1553,14 @@ def _rotulo_no_mapa(mapa, lat: float, lon: float, codigo: str, descricao: str):
             icon_size=(160, 40),
             icon_anchor=(80, 20),
             html=(
-                '<div style="pointer-events:none;text-align:center;line-height:1.05;'
-                'text-shadow:0 1px 2px #000,0 0 6px #000;">'
-                f'<div style="font-size:22px;font-weight:700;color:#fff;">{codigo_html}</div>'
-                f'<div style="font-size:11px;font-weight:500;color:#e2e8f0;">{descricao_html}</div>'
+                '<div class="esopo-mapa-rotulo" style="pointer-events:none;text-align:center;line-height:1.1;'
+                'text-shadow:0 1px 2px #000,0 0 4px #000;white-space:nowrap;">'
+                f'<div class="rotulo-cod" style="font-size:14px;font-weight:700;color:#fff;">{codigo_html}</div>'
+                f'<div class="rotulo-desc" style="display:none;font-size:10px;font-weight:500;color:#e2e8f0;">{descricao_html}</div>'
                 "</div>"
             ),
         ),
-    ).add_to(mapa)
+    ).add_to(destino)
 
 
 def _coleta(geometry, lons, lats):
@@ -977,8 +1616,7 @@ def _linhas_no_mapa(mapa, lines, mostrar_vao: bool = False):
 
 
 def _desenhar(mapa, key: str):
-    # Só o clique volta para o Python. Centro e zoom ficam no Leaflet;
-    # devolvê-los fazia o mapa reenquadrar e oscilar o zoom sozinho.
+    # Centro e zoom ficam no navegador. Devolvê-los recriava o mapa e piscava a tela.
     saida = st_folium(
         mapa,
         key=key,
@@ -989,17 +1627,52 @@ def _desenhar(mapa, key: str):
     return (saida or {}).get("last_object_clicked") or {}
 
 
+def _numero(valor, casas: int) -> str:
+    return f"{float(valor):.{casas}f}".replace(".", ",")
+
+
+def _tabela_indices(quadro: pd.DataFrame, criterio: str, media):
+    st.markdown(f"**Índices da camada Animais** — o mapa está colorido por {criterio}")
+    if quadro.empty or quadro["cabecas"].sum() == 0:
+        st.info("Nenhum local vinculado tem animal ativo.")
+        return
+    coluna = "ua_ha" if criterio == "UA/ha" else "gpd"
+    visao = quadro[quadro["cabecas"] > 0].copy()
+    visao["vs_media"] = None if media is None else (visao[coluna] - float(media)).round(3)
+    visao = visao.sort_values(coluna, ascending=False, na_position="last")
+    st.dataframe(
+        visao[
+            ["local", "ha", "cabecas", "peso_medio", "peso_total", "dias", "gpd", "ua_ha", "vs_media"]
+        ],
+        hide_index=True,
+        use_container_width=True,
+        column_config={
+            "local": st.column_config.TextColumn("Local"),
+            "ha": st.column_config.NumberColumn("Hectares", format="%.2f"),
+            "cabecas": st.column_config.NumberColumn("Cabeças"),
+            "peso_medio": st.column_config.NumberColumn("Peso médio (kg)", format="%.1f"),
+            "peso_total": st.column_config.NumberColumn("Peso total (kg)", format="%.1f"),
+            "dias": st.column_config.NumberColumn("Dias da pesagem", format="%.0f"),
+            "gpd": st.column_config.NumberColumn("GPD médio", format="%.3f"),
+            "ua_ha": st.column_config.NumberColumn("UA/ha", format="%.3f"),
+            "vs_media": st.column_config.NumberColumn(f"vs média de {criterio}", format="%.3f"),
+        },
+    )
+    st.caption(
+        "UA/ha = (peso total da última pesagem ÷ 450 kg) ÷ hectares da área no mapa. "
+        "GPD médio e os dias são da última pesagem de cada animal até hoje. "
+        "A média geral usa só os pastos com animal ativo."
+    )
+
+
 def _estilo_animais(feature):
-    n = feature["properties"].get("cabecas") or 0
-    if n <= 0:
-        cor = "#cbd5e1"
-    elif n <= 15:
-        cor = "#6ee7b7"
-    elif n <= 40:
-        cor = "#059669"
-    else:
-        cor = "#064e3b"
-    return {"fillColor": cor, "color": "#064e3b", "weight": 1.6, "fillOpacity": 0.62}
+    cor = feature["properties"].get("cor") or _CINZA_SEM_ANIMAL
+    return {
+        "fillColor": cor,
+        "color": "#334155" if cor == _CINZA_SEM_ANIMAL else "#14532d",
+        "weight": 1.6,
+        "fillOpacity": 0.28 if cor == _CINZA_SEM_ANIMAL else 0.62,
+    }
 
 
 def _area_util(row) -> bool:

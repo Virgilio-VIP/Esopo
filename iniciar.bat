@@ -32,6 +32,9 @@ if not exist .venv\Scripts\python.exe (
 set "VENV_PY=.venv\Scripts\python.exe"
 set "VENV_PIP=.venv\Scripts\pip.exe"
 
+echo  Encerrando instancia antiga na porta 8501, se existir...
+powershell -NoProfile -Command "Get-NetTCPConnection -LocalPort 8501 -State Listen -ErrorAction SilentlyContinue | ForEach-Object { Stop-Process -Id $_.OwningProcess -Force -ErrorAction SilentlyContinue }"
+
 echo  Verificando dependencias...
 "%VENV_PY%" -m pip install -q -r requirements.txt
 if errorlevel 1 (

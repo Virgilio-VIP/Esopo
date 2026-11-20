@@ -75,7 +75,7 @@ class SqlServerStore:
             SELECT id, seq, area_ha, situacao, geojson
             FROM Esopo_geo_area
             WHERE cod_fazenda = ?
-              AND ISNULL(situacao, '') <> 'excluida'
+              AND ISNULL(situacao, '') NOT IN ('excluida', 'perimetro')
             ORDER BY seq
             """,
             int(cod_fazenda),
@@ -105,7 +105,10 @@ class SqlServerStore:
         cod = int(cod_fazenda)
         cur = self.conn.cursor()
         cur.execute("DELETE FROM Esopo_geo_linha WHERE cod_fazenda = ?", cod)
-        cur.execute("DELETE FROM Esopo_geo_area WHERE cod_fazenda = ?", cod)
+        cur.execute(
+            "DELETE FROM Esopo_geo_area WHERE cod_fazenda = ? AND ISNULL(situacao, '') <> 'perimetro'",
+            cod,
+        )
         seq_to_id: dict[int, int] = {}
         for poly in polygons:
             cur.execute(
@@ -146,11 +149,14 @@ class SqlServerStore:
         if keep:
             marks = ",".join("?" for _ in keep)
             cur.execute(
-                f"DELETE FROM Esopo_geo_area WHERE cod_fazenda = ? AND id NOT IN ({marks})",
+                f"DELETE FROM Esopo_geo_area WHERE cod_fazenda = ? AND ISNULL(situacao, '') <> 'perimetro' AND id NOT IN ({marks})",
                 [cod, *keep],
             )
         else:
-            cur.execute("DELETE FROM Esopo_geo_area WHERE cod_fazenda = ?", cod)
+            cur.execute(
+                "DELETE FROM Esopo_geo_area WHERE cod_fazenda = ? AND ISNULL(situacao, '') <> 'perimetro'",
+                cod,
+            )
         seq_to_id = self._insert_areas_and_lines(cur, cod, arquivo, polygons, lines)
         self.conn.commit()
         return seq_to_id
@@ -207,6 +213,49 @@ class SqlServerStore:
         )
         self.conn.commit()
 
+    def salvar_perimetro(self, cod_fazenda: int, geojson: dict, area_ha: float) -> int:
+        """Mantém um único polígono externo da fazenda, com o mesmo id entre gravações."""
+        cod = int(cod_fazenda)
+        payload = json.dumps(geojson, ensure_ascii=False)
+        cur = self.conn.cursor()
+        cur.execute(
+            """
+            SELECT id, geojson
+            FROM Esopo_geo_area
+            WHERE cod_fazenda = ? AND situacao = 'perimetro'
+            """,
+            cod,
+        )
+        atual = cur.fetchone()
+        if atual is not None and str(atual[1]) == payload:
+            return int(atual[0])
+        if atual is not None:
+            cur.execute(
+                """
+                UPDATE Esopo_geo_area
+                SET arquivo = 'perimetro', seq = 0, area_ha = ?, geojson = ?
+                WHERE id = ?
+                """,
+                float(area_ha),
+                payload,
+                int(atual[0]),
+            )
+            self.conn.commit()
+            return int(atual[0])
+        cur.execute(
+            """
+            INSERT INTO Esopo_geo_area (cod_fazenda, arquivo, seq, area_ha, situacao, geojson)
+            OUTPUT INSERTED.id
+            VALUES (?, 'perimetro', 0, ?, 'perimetro', ?)
+            """,
+            cod,
+            float(area_ha),
+            payload,
+        )
+        novo = int(cur.fetchone()[0])
+        self.conn.commit()
+        return novo
+
 
 class PostgisStore:
     backend = "postgis"
@@ -257,7 +306,7 @@ class PostgisStore:
             SELECT id, seq, area_ha, situacao, geojson
             FROM geo_area
             WHERE cod_fazenda = %s
-              AND COALESCE(situacao, '') <> 'excluida'
+              AND COALESCE(situacao, '') NOT IN ('excluida', 'perimetro')
             ORDER BY seq
             """,
             (int(cod_fazenda),),
@@ -281,7 +330,10 @@ class PostgisStore:
         cod = int(cod_fazenda)
         cur = self.conn.cursor()
         cur.execute("DELETE FROM geo_linha WHERE cod_fazenda = %s", (cod,))
-        cur.execute("DELETE FROM geo_area WHERE cod_fazenda = %s", (cod,))
+        cur.execute(
+            "DELETE FROM geo_area WHERE cod_fazenda = %s AND COALESCE(situacao, '') <> 'perimetro'",
+            (cod,),
+        )
         seq_to_id: dict[int, int] = {}
         for poly in polygons:
             payload = json.dumps(poly["geojson"], ensure_ascii=False)
@@ -320,11 +372,19 @@ class PostgisStore:
         cur.execute("DELETE FROM geo_linha WHERE cod_fazenda = %s", (cod,))
         if keep:
             cur.execute(
-                "DELETE FROM geo_area WHERE cod_fazenda = %s AND NOT (id = ANY(%s))",
+                """
+                DELETE FROM geo_area
+                WHERE cod_fazenda = %s
+                  AND COALESCE(situacao, '') <> 'perimetro'
+                  AND NOT (id = ANY(%s))
+                """,
                 (cod, keep),
             )
         else:
-            cur.execute("DELETE FROM geo_area WHERE cod_fazenda = %s", (cod,))
+            cur.execute(
+                "DELETE FROM geo_area WHERE cod_fazenda = %s AND COALESCE(situacao, '') <> 'perimetro'",
+                (cod,),
+            )
         seq_to_id: dict[int, int] = {}
         for poly in polygons:
             payload = json.dumps(poly["geojson"], ensure_ascii=False)
@@ -369,6 +429,71 @@ class PostgisStore:
             (int(cod_fazenda),),
         )
         self.conn.commit()
+
+    def salvar_perimetro(self, cod_fazenda: int, geojson: dict, area_ha: float) -> int:
+        cod = int(cod_fazenda)
+        payload = json.dumps(geojson, ensure_ascii=False)
+        cur = self.conn.cursor()
+        cur.execute(
+            """
+            SELECT id, geojson
+            FROM geo_area
+            WHERE cod_fazenda = %s AND situacao = 'perimetro'
+            """,
+            (cod,),
+        )
+        atual = cur.fetchone()
+        if atual is not None and str(atual[1]) == payload:
+            return int(atual[0])
+        geom = "ST_SetSRID(ST_GeomFromGeoJSON(%s), 4326)"
+        try:
+            if atual is not None:
+                cur.execute(
+                    f"""
+                    UPDATE geo_area
+                    SET arquivo = 'perimetro', seq = 0, area_ha = %s, geojson = %s, geom = {geom}
+                    WHERE id = %s
+                    """,
+                    (float(area_ha), payload, payload, int(atual[0])),
+                )
+                self.conn.commit()
+                return int(atual[0])
+            cur.execute(
+                f"""
+                INSERT INTO geo_area (cod_fazenda, arquivo, seq, area_ha, situacao, geojson, geom)
+                VALUES (%s, 'perimetro', 0, %s, 'perimetro', %s, {geom})
+                RETURNING id
+                """,
+                (cod, float(area_ha), payload, payload),
+            )
+            novo = int(cur.fetchone()[0])
+            self.conn.commit()
+            return novo
+        except Exception:
+            self.conn.rollback()
+            cur = self.conn.cursor()
+            if atual is not None:
+                cur.execute(
+                    """
+                    UPDATE geo_area
+                    SET arquivo = 'perimetro', seq = 0, area_ha = %s, geojson = %s
+                    WHERE id = %s
+                    """,
+                    (float(area_ha), payload, int(atual[0])),
+                )
+                self.conn.commit()
+                return int(atual[0])
+            cur.execute(
+                """
+                INSERT INTO geo_area (cod_fazenda, arquivo, seq, area_ha, situacao, geojson, geom)
+                VALUES (%s, 'perimetro', 0, %s, 'perimetro', %s, NULL)
+                RETURNING id
+                """,
+                (cod, float(area_ha), payload),
+            )
+            novo = int(cur.fetchone()[0])
+            self.conn.commit()
+            return novo
 
     def close(self):
         self.conn.close()
