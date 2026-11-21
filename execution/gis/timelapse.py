@@ -41,10 +41,9 @@ _MESES = [
 
 # Recorte do mapa dentro do cartão, igual em todos os quadros.
 _PAINEL = (76, 80, 404, 358)
-# Caixa do contorno amarelo (Limite da Propriedade [CAR]) no frame completo.
-# Detectado automaticamente por threshold de cor nos pixels do frame de ago/2026.
-# Estes valores mapeiam o contorno da fazenda para o envelope geográfico dos pastos.
-_LIMITE = (157, 174, 323, 321)
+# Caixa do contorno amarelo (Limite da Propriedade [CAR]) no frame completo: (x1_west, y1_north, x2_east, y2_south)
+# Medição exata no vídeo: West=156 (32A), North=137 (03/24A), East=323 (01A), South=322 (17/19).
+_LIMITE = (156, 167, 324.5, 322)
 
 
 def arquivo_timelapse(raiz: str | None = None) -> str | None:

@@ -2828,8 +2828,10 @@ def main():
                 st.info(f"📊 Sem dados para gerar gráficos em {month_name} de {cal_year}.")
 
         elif page == "🗺️ Mapa":
+            import gis.timelapse
             import mapa
             import importlib
+            importlib.reload(gis.timelapse)
             importlib.reload(mapa)
             mapa.render_mapa(conn, df_all_farms, selected_codes)
 
