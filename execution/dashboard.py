@@ -2828,8 +2828,10 @@ def main():
                 st.info(f"📊 Sem dados para gerar gráficos em {month_name} de {cal_year}.")
 
         elif page == "🗺️ Mapa":
-            from mapa import render_mapa
-            render_mapa(conn, df_all_farms, selected_codes)
+            import mapa
+            import importlib
+            importlib.reload(mapa)
+            mapa.render_mapa(conn, df_all_farms, selected_codes)
 
     except Exception as e:
         st.error(f"❌ Erro: {e}")

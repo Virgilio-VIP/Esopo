@@ -14,6 +14,7 @@ from branca.element import MacroElement
 from jinja2 import Template
 from plotly.subplots import make_subplots
 import streamlit as st
+import streamlit.components.v1 as components
 from folium.plugins import Draw, Fullscreen
 from folium.raster_layers import ImageOverlay
 from pyproj import Geod
@@ -67,6 +68,119 @@ class _RotulosPorZoom(MacroElement):
     {% endmacro %}
     """
     )
+
+
+class _PersistenciaTimelapse(MacroElement):
+    """Mantém a camada Timelapse selecionada e troca os frames instantaneamente sem recriar o mapa."""
+
+    _template = Template(
+        """
+    {% macro script(this, kwargs) %}
+    (function() {
+        var map = {{this._parent.get_name()}};
+        var chave = 'esopo_timelapse_checked_{{this.cod_fazenda}}';
+        var chaveIdx = 'esopo_tl_idx_{{this.cod_fazenda}}';
+
+        map.on('overlayadd', function(e) {
+            if (e && e.name === 'Timelapse') {
+                try { sessionStorage.setItem(chave, '1'); } catch(err){}
+            }
+        });
+        map.on('overlayremove', function(e) {
+            if (e && e.name === 'Timelapse') {
+                try { sessionStorage.setItem(chave, '0'); } catch(err){}
+            }
+        });
+
+        function aplicarPersistencia() {
+            try {
+                {% if this.ativo %}
+                var salvo = sessionStorage.getItem(chave);
+                if (salvo === '1') {
+                    var labels = document.querySelectorAll('.leaflet-control-layers-overlays label');
+                    for (var i = 0; i < labels.length; i++) {
+                        var lbl = labels[i];
+                        if (lbl.textContent && lbl.textContent.indexOf('Timelapse') !== -1) {
+                            var cb = lbl.querySelector('input[type="checkbox"]');
+                            if (cb && !cb.checked) {
+                                cb.click();
+                            }
+                            break;
+                        }
+                    }
+                }
+                {% else %}
+                sessionStorage.removeItem(chave);
+                {% endif %}
+            } catch (e) {
+                console.error(e);
+            }
+        }
+
+        {% if this.overlay_name and this.frames_json %}
+        var overlay = {{this.overlay_name}};
+        var frames = {{this.frames_json}};
+        var ultimoIdx = -1;
+
+        function trocarQuadro(idx) {
+            if (!overlay || !frames || frames.length === 0) return;
+            idx = Math.max(0, Math.min(idx, frames.length - 1));
+            if (idx === ultimoIdx) return;
+            ultimoIdx = idx;
+            var el = overlay.getElement();
+            if (el) {
+                el.style.transition = 'opacity 0.15s ease-in-out';
+            }
+            overlay.setUrl(frames[idx]);
+        }
+
+        if (window.BroadcastChannel) {
+            try {
+                var bc = new BroadcastChannel('esopo_tl_channel_{{this.cod_fazenda}}');
+                bc.onmessage = function(e) {
+                    if (e && e.data && typeof e.data.idx === 'number') {
+                        trocarQuadro(e.data.idx);
+                    }
+                };
+            } catch(e) {}
+        }
+
+        function sincronizarQuadro() {
+            try {
+                var val = localStorage.getItem(chaveIdx);
+                if (val !== null) {
+                    var idx = parseInt(val, 10);
+                    if (!isNaN(idx)) {
+                        trocarQuadro(idx);
+                    }
+                }
+            } catch(e) {}
+        }
+
+        setInterval(sincronizarQuadro, 40);
+        sincronizarQuadro();
+        {% endif %}
+
+        aplicarPersistencia();
+        map.whenReady(function() {
+            aplicarPersistencia();
+            {% if this.overlay_name and this.frames_json %}
+            sincronizarQuadro();
+            {% endif %}
+            setTimeout(aplicarPersistencia, 60);
+            setTimeout(aplicarPersistencia, 200);
+        });
+    })();
+    {% endmacro %}
+    """
+    )
+
+    def __init__(self, cod_fazenda: int, ativo: bool, overlay=None, frames_json=None):
+        super().__init__()
+        self.cod_fazenda = int(cod_fazenda)
+        self.ativo = bool(ativo)
+        self.overlay_name = overlay.get_name() if overlay is not None else None
+        self.frames_json = frames_json
 
 
 def _timelapse_play_ligar(cod_fazenda: int) -> None:
@@ -400,9 +514,14 @@ def _preparar_timelapse(conn, cod_fazenda: int, areas: list[dict]) -> tuple[pd.D
         serie = st.session_state[chave_serie]
 
         chave_img = f"timelapse_img_{cod_fazenda}"
-        if st.session_state.get(f"{chave_img}_mtime") != mtime:
+        # Inclui o mtime do módulo timelapse.py para invalidar o cache quando _LIMITE/_PAINEL mudarem
+        import gis.timelapse as _tl_mod
+        _tl_mtime = round(os.path.getmtime(_tl_mod.__file__), 0)
+        _cache_key = (mtime, _tl_mtime)
+        if st.session_state.get(f"{chave_img}_mtime") != _cache_key:
+            quadros_jpeg.cache_clear()
             st.session_state[chave_img] = quadros_jpeg(video, mtime)
-            st.session_state[f"{chave_img}_mtime"] = mtime
+            st.session_state[f"{chave_img}_mtime"] = _cache_key
         imagens = st.session_state[chave_img]
         return serie, imagens, None
     except Exception as exc:
@@ -414,26 +533,29 @@ def _url_quadro(imagens: tuple[bytes, ...], indice: int) -> str:
     return "data:image/jpeg;base64," + base64.b64encode(imagens[indice]).decode("ascii")
 
 
-def _timelapse_na_camada(mapa, areas, imagens: tuple[bytes, ...] | None, indice: int):
-    """ImageOverlay da camada Timelapse, o mesmo encaixe do controle do mapa."""
+def _timelapse_na_camada(mapa, areas, imagens: tuple[bytes, ...] | None):
+    """ImageOverlay da camada Timelapse, com todos os quadros prontos para transição suave."""
     if not imagens:
-        return
+        return None, None
     from gis.timelapse import bounds_painel, envelope
 
     caixa = envelope(areas)
     if caixa is None:
-        return
+        return None, None
     west, south, east, north = caixa
-    grupo = folium.FeatureGroup(name="Timelapse", show=True)
-    ImageOverlay(
-        _url_quadro(imagens, indice),
+    grupo = folium.FeatureGroup(name="Timelapse", show=False)
+    overlay = ImageOverlay(
+        _url_quadro(imagens, 0),
         bounds=bounds_painel(west, south, east, north),
         opacity=0.9,
         interactive=False,
         cross_origin=False,
         zindex=1,
-    ).add_to(grupo)
+    )
+    overlay.add_to(grupo)
     grupo.add_to(mapa)
+    frames_urls = [_url_quadro(imagens, i) for i in range(len(imagens))]
+    return overlay, json.dumps(frames_urls)
 
 
 def _grafico_timelapse(serie: pd.DataFrame):
@@ -698,16 +820,28 @@ def _mapa_interativo(conn, store, cod_fazenda: int):
     serie_tempo = None
     imagens_tempo = None
     erro_tempo = None
+    tl_key = f"timelapse_ativo_{cod_fazenda}"
     if int(cod_fazenda) == 4:
         serie_tempo, imagens_tempo, erro_tempo = _preparar_timelapse(conn, cod_fazenda, areas)
         if f"timelapse_vel_{cod_fazenda}" not in st.session_state:
             st.session_state[f"timelapse_vel_{cod_fazenda}"] = 2.0
+        # Toggle que controla visibilidade da camada e do painel abaixo do mapa
+        timelapse_ativo = st.toggle(
+            "Camada Timelapse",
+            value=st.session_state.get(tl_key, False),
+            key=tl_key,
+            help="Habilita/desabilita o Pasture Watch · Timelapse no mapa e os controles abaixo.",
+        )
+    else:
+        timelapse_ativo = False
 
     mapa = _base_map(features_animais)
     indice_tempo = int(st.session_state.get(f"timelapse_idx_{cod_fazenda}", 0))
-    if int(cod_fazenda) == 4 and imagens_tempo:
+    overlay_tl = None
+    frames_json_tl = None
+    if int(cod_fazenda) == 4 and imagens_tempo and timelapse_ativo:
         try:
-            _timelapse_na_camada(mapa, areas, imagens_tempo, indice_tempo)
+            overlay_tl, frames_json_tl = _timelapse_na_camada(mapa, areas, imagens_tempo)
         except Exception as exc:
             erro_tempo = erro_tempo or str(exc)
     folium.GeoJson(
@@ -749,6 +883,7 @@ def _mapa_interativo(conn, store, cod_fazenda: int):
     rotulos.add_to(mapa)
     _RotulosPorZoom().add_to(mapa)
     folium.LayerControl(collapsed=False).add_to(mapa)
+    _PersistenciaTimelapse(int(cod_fazenda), timelapse_ativo, overlay_tl, frames_json_tl).add_to(mapa)
 
     if media is None:
         st.caption("Ainda não há pesagem nos pastos com animal. As áreas ficam cinza.")
@@ -759,6 +894,26 @@ def _mapa_interativo(conn, store, cod_fazenda: int):
             "Verde escuro é o maior índice, palha fica na média e laranja amarronzado é o menor. "
             "Pasto sem animal ativo permanece cinza."
         )
+    if int(cod_fazenda) == 4 and timelapse_ativo:
+        components.html(
+            f"""
+            <script>
+                (function() {{
+                    var idx = {indice_tempo};
+                    try {{
+                        localStorage.setItem('esopo_tl_idx_{cod_fazenda}', String(idx));
+                        if (window.BroadcastChannel) {{
+                            var bc = new BroadcastChannel('esopo_tl_channel_{cod_fazenda}');
+                            bc.postMessage({{type: 'FRAME_CHANGE', idx: idx}});
+                            bc.close();
+                        }}
+                    }} catch(e) {{}}
+                }})();
+            </script>
+            """,
+            height=0,
+            width=0,
+        )
     clique = _desenhar(mapa, f"mapa-folium-{cod_fazenda}")
     if perimetro_id is not None:
         st.caption(
@@ -767,6 +922,8 @@ def _mapa_interativo(conn, store, cod_fazenda: int):
         )
     if int(cod_fazenda) != 4:
         st.info("O **Pasture Watch (timelapse)** está liberado na **Fazenda Tailandia (4)**. Escolha essa opção em *Fazenda do mapa*.")
+    elif not timelapse_ativo:
+        pass  # camada desabilitada — painel oculto
     elif serie_tempo is not None:
         st.caption("Ligue a camada **Timelapse** no quadro de camadas do mapa. O mês é o controle abaixo.")
         _painel_timelapse(serie_tempo, cod_fazenda)
