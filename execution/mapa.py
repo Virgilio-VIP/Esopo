@@ -71,7 +71,7 @@ class _RotulosPorZoom(MacroElement):
 
 
 class _PersistenciaTimelapse(MacroElement):
-    """Mantém a camada Timelapse selecionada e troca os frames instantaneamente sem recriar o mapa."""
+    """Mantém a camada Timelapse selecionada e troca os frames instantaneamente sem recriar o mapa nem piscar."""
 
     _template = Template(
         """
@@ -84,6 +84,11 @@ class _PersistenciaTimelapse(MacroElement):
         map.on('overlayadd', function(e) {
             if (e && e.name === 'Timelapse') {
                 try { sessionStorage.setItem(chave, '1'); } catch(err){}
+                {% if this.overlay_names %}
+                if (typeof sincronizarQuadro === 'function') {
+                    sincronizarQuadro();
+                }
+                {% endif %}
             }
         });
         map.on('overlayremove', function(e) {
@@ -117,21 +122,36 @@ class _PersistenciaTimelapse(MacroElement):
             }
         }
 
-        {% if this.overlay_name and this.frames_json %}
-        var overlay = {{this.overlay_name}};
-        var frames = {{this.frames_json}};
+        {% if this.overlay_names %}
+        var overlays = [ {{ this.overlay_names | join(', ') }} ];
         var ultimoIdx = -1;
 
         function trocarQuadro(idx) {
-            if (!overlay || !frames || frames.length === 0) return;
-            idx = Math.max(0, Math.min(idx, frames.length - 1));
+            if (!overlays || overlays.length === 0) return;
+            idx = Math.max(0, Math.min(idx, overlays.length - 1));
             if (idx === ultimoIdx) return;
             ultimoIdx = idx;
-            var el = overlay.getElement();
-            if (el) {
-                el.style.transition = 'opacity 0.15s ease-in-out';
+
+            // 1. Exibe primeiro o próximo quadro (já carregado e decodificado no DOM)
+            var proximoOverlay = overlays[idx];
+            if (proximoOverlay) {
+                var proximoEl = proximoOverlay.getElement();
+                if (proximoEl) {
+                    proximoEl.style.display = 'block';
+                }
+                proximoOverlay.setOpacity(0.9);
             }
-            overlay.setUrl(frames[idx]);
+
+            // 2. Oculta todos os demais quadros imediatamente
+            for (var i = 0; i < overlays.length; i++) {
+                if (i !== idx && overlays[i]) {
+                    overlays[i].setOpacity(0);
+                    var el = overlays[i].getElement();
+                    if (el) {
+                        el.style.display = 'none';
+                    }
+                }
+            }
         }
 
         if (window.BroadcastChannel) {
@@ -152,9 +172,13 @@ class _PersistenciaTimelapse(MacroElement):
                     var idx = parseInt(val, 10);
                     if (!isNaN(idx)) {
                         trocarQuadro(idx);
+                        return;
                     }
                 }
             } catch(e) {}
+            if (ultimoIdx < 0) {
+                trocarQuadro({{ this.indice_inicial }});
+            }
         }
 
         setInterval(sincronizarQuadro, 40);
@@ -164,7 +188,7 @@ class _PersistenciaTimelapse(MacroElement):
         aplicarPersistencia();
         map.whenReady(function() {
             aplicarPersistencia();
-            {% if this.overlay_name and this.frames_json %}
+            {% if this.overlay_names %}
             sincronizarQuadro();
             {% endif %}
             setTimeout(aplicarPersistencia, 60);
@@ -175,12 +199,12 @@ class _PersistenciaTimelapse(MacroElement):
     """
     )
 
-    def __init__(self, cod_fazenda: int, ativo: bool, overlay=None, frames_json=None):
+    def __init__(self, cod_fazenda: int, ativo: bool, overlays=None, indice_inicial: int = 0):
         super().__init__()
         self.cod_fazenda = int(cod_fazenda)
         self.ativo = bool(ativo)
-        self.overlay_name = overlay.get_name() if overlay is not None else None
-        self.frames_json = frames_json
+        self.overlay_names = [ov.get_name() for ov in (overlays or []) if ov is not None]
+        self.indice_inicial = int(indice_inicial)
 
 
 def _timelapse_play_ligar(cod_fazenda: int) -> None:
@@ -538,29 +562,34 @@ def _url_quadro(imagens: tuple[bytes, ...], indice: int) -> str:
     return "data:image/png;base64," + base64.b64encode(imagens[indice]).decode("ascii")
 
 
-def _timelapse_na_camada(mapa, areas, imagens: tuple[bytes, ...] | None):
-    """ImageOverlay da camada Timelapse, com todos os quadros prontos para transição suave."""
+def _timelapse_na_camada(mapa, areas, imagens: tuple[bytes, ...] | None, indice_inicial: int = 0) -> list:
+    """Pré-carrega todos os quadros recortados como ImageOverlays no FeatureGroup do Leaflet."""
     if not imagens:
-        return None, None
+        return []
     from gis.timelapse import bounds_painel, envelope
 
     caixa = envelope(areas)
     if caixa is None:
-        return None, None
+        return []
     west, south, east, north = caixa
+    bounds = bounds_painel(west, south, east, north)
     grupo = folium.FeatureGroup(name="Timelapse", show=False)
-    overlay = ImageOverlay(
-        _url_quadro(imagens, 0),
-        bounds=bounds_painel(west, south, east, north),
-        opacity=0.9,
-        interactive=False,
-        cross_origin=False,
-        zindex=1,
-    )
-    overlay.add_to(grupo)
+    overlays = []
+    total = len(imagens)
+    for i in range(total):
+        eh_inicial = (i == indice_inicial)
+        overlay = ImageOverlay(
+            _url_quadro(imagens, i),
+            bounds=bounds,
+            opacity=0.9 if eh_inicial else 0.0,
+            interactive=False,
+            cross_origin=False,
+            zindex=1,
+        )
+        overlay.add_to(grupo)
+        overlays.append(overlay)
     grupo.add_to(mapa)
-    frames_urls = [_url_quadro(imagens, i) for i in range(len(imagens))]
-    return overlay, json.dumps(frames_urls)
+    return overlays
 
 
 def _grafico_timelapse(serie: pd.DataFrame):
@@ -842,11 +871,10 @@ def _mapa_interativo(conn, store, cod_fazenda: int):
 
     mapa = _base_map(features_animais)
     indice_tempo = int(st.session_state.get(f"timelapse_idx_{cod_fazenda}", 0))
-    overlay_tl = None
-    frames_json_tl = None
+    overlays_tl = []
     if int(cod_fazenda) == 4 and imagens_tempo and timelapse_ativo:
         try:
-            overlay_tl, frames_json_tl = _timelapse_na_camada(mapa, areas, imagens_tempo)
+            overlays_tl = _timelapse_na_camada(mapa, areas, imagens_tempo, indice_inicial=indice_tempo)
         except Exception as exc:
             erro_tempo = erro_tempo or str(exc)
     folium.GeoJson(
@@ -888,7 +916,7 @@ def _mapa_interativo(conn, store, cod_fazenda: int):
     rotulos.add_to(mapa)
     _RotulosPorZoom().add_to(mapa)
     folium.LayerControl(collapsed=False).add_to(mapa)
-    _PersistenciaTimelapse(int(cod_fazenda), timelapse_ativo, overlay_tl, frames_json_tl).add_to(mapa)
+    _PersistenciaTimelapse(int(cod_fazenda), timelapse_ativo, overlays_tl, indice_inicial=indice_tempo).add_to(mapa)
 
     if media is None:
         st.caption("Ainda não há pesagem nos pastos com animal. As áreas ficam cinza.")
