@@ -281,26 +281,33 @@ _LIMITES_TEMPO_PADRAO = {
     "biomassa": [
         {"classe": "Crítica", "maximo": 0.5},
         {"classe": "Baixa", "maximo": 1.0},
-        {"classe": "Moderada", "maximo": 2.0},
-        {"classe": "Boa", "maximo": 3.0},
-        {"classe": "Alta", "maximo": 999.0},
+        {"classe": "Média", "maximo": 2.0},
+        {"classe": "Boa", "maximo": 3.5},
+        {"classe": "Alta", "maximo": 6.0},
+        {"classe": "Sobra", "maximo": 999.0},
     ],
     "carga": [
-        {"classe": "Esparsa", "maximo": 0.5},
-        {"classe": "Moderada", "maximo": 0.8},
-        {"classe": "Cheia", "maximo": 1.0},
-        {"classe": "Intensa", "maximo": 999.0},
+        {"classe": "Sub", "maximo": 0.3},
+        {"classe": "Baixa", "maximo": 0.5},
+        {"classe": "Média", "maximo": 0.8},
+        {"classe": "Boa", "maximo": 1.0},
+        {"classe": "Alta", "maximo": 1.5},
+        {"classe": "Sobre", "maximo": 999.0},
     ],
     "ua_ha": [
+        {"classe": "Sub", "maximo": 0.3},
         {"classe": "Baixa", "maximo": 0.5},
-        {"classe": "Moderada", "maximo": 0.8},
-        {"classe": "Alta", "maximo": 1.2},
-        {"classe": "Muito alta", "maximo": 999.0},
+        {"classe": "Média", "maximo": 0.8},
+        {"classe": "Boa", "maximo": 1.0},
+        {"classe": "Alta", "maximo": 1.5},
+        {"classe": "Sobre", "maximo": 999.0},
     ],
     "pressao_pct": [
-        {"classe": "Leve", "maximo": 15.0},
-        {"classe": "Moderada", "maximo": 35.0},
-        {"classe": "Forte", "maximo": 60.0},
+        {"classe": "Leve", "maximo": 1.5},
+        {"classe": "Baixa", "maximo": 3.0},
+        {"classe": "Média", "maximo": 4.0},
+        {"classe": "Boa", "maximo": 6.0},
+        {"classe": "Alta", "maximo": 8.0},
         {"classe": "Crítica", "maximo": 999.0},
     ],
 }
@@ -497,7 +504,7 @@ def _preparar_timelapse(conn, cod_fazenda: int, areas: list[dict]) -> tuple[pd.D
     """Série mensal e JPEGs do vídeo, sem depender do Folium."""
     if int(cod_fazenda) != 4:
         return None, None, None
-    from gis.timelapse import arquivo_timelapse, envelope, quadros_jpeg, serie_fazenda
+    from gis.timelapse import arquivo_timelapse, envelope, quadros_recortados, serie_fazenda
 
     video = arquivo_timelapse()
     if video is None:
@@ -513,14 +520,12 @@ def _preparar_timelapse(conn, cod_fazenda: int, areas: list[dict]) -> tuple[pd.D
             st.session_state[f"{chave_serie}_ha"] = hectares
         serie = st.session_state[chave_serie]
 
-        chave_img = f"timelapse_img_{cod_fazenda}"
-        # Inclui o mtime do módulo timelapse.py para invalidar o cache quando _LIMITE/_PAINEL mudarem
+        chave_img = f"timelapse_img_masked_{cod_fazenda}"
         import gis.timelapse as _tl_mod
         _tl_mtime = round(os.path.getmtime(_tl_mod.__file__), 0)
-        _cache_key = (mtime, _tl_mtime)
+        _cache_key = (mtime, _tl_mtime, len(areas))
         if st.session_state.get(f"{chave_img}_mtime") != _cache_key:
-            quadros_jpeg.cache_clear()
-            st.session_state[chave_img] = quadros_jpeg(video, mtime)
+            st.session_state[chave_img] = quadros_recortados(video, areas)
             st.session_state[f"{chave_img}_mtime"] = _cache_key
         imagens = st.session_state[chave_img]
         return serie, imagens, None
@@ -530,7 +535,7 @@ def _preparar_timelapse(conn, cod_fazenda: int, areas: list[dict]) -> tuple[pd.D
 
 def _url_quadro(imagens: tuple[bytes, ...], indice: int) -> str:
     indice = max(0, min(int(indice), len(imagens) - 1))
-    return "data:image/jpeg;base64," + base64.b64encode(imagens[indice]).decode("ascii")
+    return "data:image/png;base64," + base64.b64encode(imagens[indice]).decode("ascii")
 
 
 def _timelapse_na_camada(mapa, areas, imagens: tuple[bytes, ...] | None):
