@@ -71,7 +71,13 @@ class _RotulosPorZoom(MacroElement):
 
 
 class _PersistenciaTimelapse(MacroElement):
-    """Mantém a camada Timelapse selecionada e troca os frames instantaneamente sem recriar o mapa nem piscar."""
+    """Mantém a camada Timelapse e corta de um quadro para o outro no mapa já aberto.
+
+    Os dois ImageOverlays ficam no mesmo retângulo. O quadro novo é decodificado
+    no buffer invisível e só então as opacidades trocam, no mesmo ciclo de pintura.
+    O índice não entra no HTML do Folium: se entrasse, o streamlit-folium
+    remontaria o iframe a cada mês e o satélite inteiro esmaeceria.
+    """
 
     _template = Template(
         """
@@ -81,153 +87,248 @@ class _PersistenciaTimelapse(MacroElement):
         var chave = 'esopo_timelapse_checked_{{this.cod_fazenda}}';
         var chaveIdx = 'esopo_tl_idx_{{this.cod_fazenda}}';
 
+        if (!document.getElementById('esopo-tl-style')) {
+            var estilo = document.createElement('style');
+            estilo.id = 'esopo-tl-style';
+            estilo.textContent = '.leaflet-image-layer{transition:none !important;animation:none !important;}';
+            document.head.appendChild(estilo);
+        }
+
+        function sincronizarQuadro() {}
+
         map.on('overlayadd', function(e) {
             if (e && e.name === 'Timelapse') {
-                try { sessionStorage.setItem(chave, '1'); } catch(err){}
-                {% if this.overlay_names %}
-                if (typeof sincronizarQuadro === 'function') {
-                    sincronizarQuadro();
-                }
-                {% endif %}
+                try { sessionStorage.setItem(chave, '1'); } catch (err) {}
+                sincronizarQuadro();
             }
         });
         map.on('overlayremove', function(e) {
             if (e && e.name === 'Timelapse') {
-                try { sessionStorage.setItem(chave, '0'); } catch(err){}
+                try { sessionStorage.setItem(chave, '0'); } catch (err) {}
             }
         });
+
+        function ligarCamada() {
+            var labels = document.querySelectorAll('.leaflet-control-layers-overlays label');
+            for (var i = 0; i < labels.length; i++) {
+                var lbl = labels[i];
+                if (lbl.textContent && lbl.textContent.indexOf('Timelapse') !== -1) {
+                    var cb = lbl.querySelector('input[type="checkbox"]');
+                    if (cb && !cb.checked) cb.click();
+                    return;
+                }
+            }
+        }
 
         function aplicarPersistencia() {
             try {
                 {% if this.ativo %}
-                var salvo = sessionStorage.getItem(chave);
-                if (salvo === '1') {
-                    var labels = document.querySelectorAll('.leaflet-control-layers-overlays label');
-                    for (var i = 0; i < labels.length; i++) {
-                        var lbl = labels[i];
-                        if (lbl.textContent && lbl.textContent.indexOf('Timelapse') !== -1) {
-                            var cb = lbl.querySelector('input[type="checkbox"]');
-                            if (cb && !cb.checked) {
-                                cb.click();
-                            }
-                            break;
-                        }
-                    }
-                }
+                if (sessionStorage.getItem(chave) === '1') ligarCamada();
                 {% else %}
                 sessionStorage.removeItem(chave);
                 {% endif %}
+            } catch (e) {}
+        }
+
+        {% if this.overlay_a and this.overlay_b and this.frames_json %}
+        var ovA = {{this.overlay_a}};
+        var ovB = {{this.overlay_b}};
+        var frames = {{this.frames_json}};
+        var bufferAtivo = 'A';
+        var ultimoIdx = -1;
+        var pedido = null;
+        var opacidade = 0.9;
+        var prontas = [];
+        for (var f = 0; f < frames.length; f++) {
+            var pre = new Image();
+            pre.decoding = 'sync';
+            pre.src = frames[f];
+            prontas.push(pre);
+        }
+
+        function semTransicao(el) {
+            if (!el || !el.style) return;
+            el.style.setProperty('transition', 'none', 'important');
+            el.style.setProperty('animation', 'none', 'important');
+        }
+
+        function lerIdx() {
+            try {
+                var val = localStorage.getItem(chaveIdx);
+                if (val === null) return 0;
+                var idx = parseInt(val, 10);
+                return isNaN(idx) ? 0 : idx;
             } catch (e) {
-                console.error(e);
+                return 0;
             }
         }
 
-        {% if this.overlay_names %}
-        var overlays = [ {{ this.overlay_names | join(', ') }} ];
-        var ultimoIdx = -1;
+        function elemento(layer) {
+            return layer && layer.getElement ? layer.getElement() : null;
+        }
 
         function trocarQuadro(idx) {
-            if (!overlays || overlays.length === 0) return;
-            idx = Math.max(0, Math.min(idx, overlays.length - 1));
-            if (idx === ultimoIdx) return;
-            ultimoIdx = idx;
+            if (!ovA || !ovB || !frames || !frames.length) return;
+            idx = Math.max(0, Math.min(parseInt(idx, 10) || 0, frames.length - 1));
+            var visivel = bufferAtivo === 'A' ? ovA : ovB;
+            var inativo = bufferAtivo === 'A' ? ovB : ovA;
+            var visEl = elemento(visivel);
+            var inEl = elemento(inativo);
+            if (!visEl || !inEl) return;
+            if (visEl.getAttribute('data-tl-idx') === String(idx)) {
+                ultimoIdx = idx;
+                pedido = null;
+                return;
+            }
+            if (pedido === idx) return;
 
-            // 1. Exibe primeiro o próximo quadro (já carregado e decodificado no DOM)
-            var proximoOverlay = overlays[idx];
-            if (proximoOverlay) {
-                var proximoEl = proximoOverlay.getElement();
-                if (proximoEl) {
-                    proximoEl.style.display = 'block';
-                }
-                proximoOverlay.setOpacity(0.9);
+            pedido = idx;
+            setTimeout(function() {
+                if (pedido === idx) pedido = null;
+            }, 1500);
+            semTransicao(visEl);
+            semTransicao(inEl);
+            var url = frames[idx];
+
+            function revelar() {
+                if (pedido !== idx) return;
+                if (!inEl.complete || !inEl.naturalWidth) return;
+                semTransicao(inEl);
+                semTransicao(visEl);
+                inEl.setAttribute('data-tl-idx', String(idx));
+                inativo.setOpacity(opacidade);
+                visivel.setOpacity(0);
+                bufferAtivo = bufferAtivo === 'A' ? 'B' : 'A';
+                ultimoIdx = idx;
+                pedido = null;
             }
 
-            // 2. Oculta todos os demais quadros imediatamente
-            for (var i = 0; i < overlays.length; i++) {
-                if (i !== idx && overlays[i]) {
-                    overlays[i].setOpacity(0);
-                    var el = overlays[i].getElement();
-                    if (el) {
-                        el.style.display = 'none';
-                    }
+            function aplicarSrc() {
+                if (pedido !== idx) return;
+                if (inEl.getAttribute('data-tl-src') === String(idx) && inEl.complete && inEl.naturalWidth) {
+                    revelar();
+                    return;
                 }
+                inEl.onload = function() {
+                    inEl.onload = null;
+                    revelar();
+                };
+                inEl.setAttribute('data-tl-src', String(idx));
+                inEl.src = url;
+                if (inEl.complete && inEl.naturalWidth) revelar();
+            }
+
+            var pre = prontas[idx];
+            if (pre && pre.decode) {
+                pre.decode().then(aplicarSrc).catch(aplicarSrc);
+            } else if (pre && !pre.complete) {
+                pre.onload = aplicarSrc;
+            } else {
+                aplicarSrc();
             }
         }
+
+        sincronizarQuadro = function() {
+            trocarQuadro(lerIdx());
+        };
 
         if (window.BroadcastChannel) {
             try {
                 var bc = new BroadcastChannel('esopo_tl_channel_{{this.cod_fazenda}}');
                 bc.onmessage = function(e) {
-                    if (e && e.data && typeof e.data.idx === 'number') {
-                        trocarQuadro(e.data.idx);
-                    }
+                    if (e && e.data && typeof e.data.idx === 'number') trocarQuadro(e.data.idx);
                 };
-            } catch(e) {}
-        }
-
-        function sincronizarQuadro() {
-            try {
-                var val = localStorage.getItem(chaveIdx);
-                if (val !== null) {
-                    var idx = parseInt(val, 10);
-                    if (!isNaN(idx)) {
-                        trocarQuadro(idx);
-                        return;
-                    }
-                }
-            } catch(e) {}
-            if (ultimoIdx < 0) {
-                trocarQuadro({{ this.indice_inicial }});
-            }
+            } catch (e) {}
         }
 
         setInterval(sincronizarQuadro, 40);
-        sincronizarQuadro();
         {% endif %}
 
         aplicarPersistencia();
         map.whenReady(function() {
             aplicarPersistencia();
-            {% if this.overlay_names %}
             sincronizarQuadro();
-            {% endif %}
-            setTimeout(aplicarPersistencia, 60);
-            setTimeout(aplicarPersistencia, 200);
+            setTimeout(function() { aplicarPersistencia(); sincronizarQuadro(); }, 60);
+            setTimeout(function() { aplicarPersistencia(); sincronizarQuadro(); }, 200);
         });
     })();
     {% endmacro %}
     """
     )
 
-    def __init__(self, cod_fazenda: int, ativo: bool, overlays=None, indice_inicial: int = 0):
+    def __init__(self, cod_fazenda: int, ativo: bool, overlay_a=None, overlay_b=None, frames_json=None, indice_inicial: int = 0):
         super().__init__()
         self.cod_fazenda = int(cod_fazenda)
         self.ativo = bool(ativo)
-        self.overlay_names = [ov.get_name() for ov in (overlays or []) if ov is not None]
+        self.overlay_a = overlay_a.get_name() if overlay_a is not None else None
+        self.overlay_b = overlay_b.get_name() if overlay_b is not None else None
+        self.frames_json = frames_json
         self.indice_inicial = int(indice_inicial)
+
+
+def _timelapse_touch(cod_fazenda: int) -> None:
+    """Marca interação manual para o relógio não avançar o mês no mesmo passo."""
+    st.session_state[f"tl_touch_{cod_fazenda}"] = True
 
 
 def _timelapse_play_ligar(cod_fazenda: int) -> None:
     st.session_state[f"timelapse_play_{cod_fazenda}"] = True
+    _timelapse_touch(cod_fazenda)
 
 
 def _timelapse_play_pausar(cod_fazenda: int) -> None:
     st.session_state[f"timelapse_play_{cod_fazenda}"] = False
+    _timelapse_touch(cod_fazenda)
 
 
-def _autoplay_tick(cod_fazenda: int, limite: int) -> None:
-    """Avança o mês só no timer do fragmento, sem recriar o mapa neste passo."""
+def _publicar_indice(cod_fazenda: int) -> None:
+    """Entrega o mês ao iframe do mapa. O Folium em si não é reconstruído."""
+    idx = int(st.session_state.get(f"timelapse_idx_{cod_fazenda}", 0))
+    components.html(
+        f"""
+        <script>
+        (function() {{
+            var idx = {idx};
+            try {{
+                localStorage.setItem('esopo_tl_idx_{int(cod_fazenda)}', String(idx));
+                if (window.BroadcastChannel) {{
+                    var bc = new BroadcastChannel('esopo_tl_channel_{int(cod_fazenda)}');
+                    bc.postMessage({{type: 'FRAME_CHANGE', idx: idx}});
+                    bc.close();
+                }}
+            }} catch (e) {{}}
+        }})();
+        </script>
+        """,
+        height=0,
+        width=0,
+    )
+
+
+def _fragmento_timelapse(serie: pd.DataFrame, cod_fazenda: int, play_armado: bool, vel_armada: float) -> None:
+    """Atualiza mês, cartões e o quadro no mapa sem remontar o Leaflet."""
     from streamlit.runtime.scriptrunner_utils.script_run_context import get_script_run_ctx
 
-    ctx = get_script_run_ctx()
-    if ctx is None or not ctx.fragment_ids_this_run:
-        return
-    if not st.session_state.get(f"timelapse_play_{cod_fazenda}"):
-        return
+    play_key = f"timelapse_play_{cod_fazenda}"
+    vel_key = f"timelapse_vel_{cod_fazenda}"
     idx_key = f"timelapse_idx_{cod_fazenda}"
-    atual = int(st.session_state.get(idx_key, 0))
-    st.session_state[idx_key] = 0 if atual >= int(limite) else atual + 1
-    st.rerun(scope="app")
+    tocou = bool(st.session_state.pop(f"tl_touch_{cod_fazenda}", False))
+    ctx = get_script_run_ctx()
+    em_fragmento = bool(ctx and ctx.fragment_ids_this_run)
+    limite = len(serie) - 1
+    if em_fragmento and not tocou and st.session_state.get(play_key):
+        atual = int(st.session_state.get(idx_key, 0))
+        st.session_state[idx_key] = 0 if atual >= limite else atual + 1
+
+    _painel_timelapse(serie, cod_fazenda)
+    _publicar_indice(cod_fazenda)
+
+    play = bool(st.session_state.get(play_key, False))
+    vel = round(float(st.session_state.get(vel_key, 2.0)), 2)
+    vel_armado = round(float(vel_armada), 2)
+    # O intervalo do fragmento só é rearmado quando o script inteiro roda de novo.
+    if play != bool(play_armado) or (play and vel != vel_armado):
+        st.rerun(scope="app")
 
 
 def _velocimetro_timelapse(segundos: float) -> None:
@@ -562,34 +663,52 @@ def _url_quadro(imagens: tuple[bytes, ...], indice: int) -> str:
     return "data:image/png;base64," + base64.b64encode(imagens[indice]).decode("ascii")
 
 
-def _timelapse_na_camada(mapa, areas, imagens: tuple[bytes, ...] | None, indice_inicial: int = 0) -> list:
-    """Pré-carrega todos os quadros recortados como ImageOverlays no FeatureGroup do Leaflet."""
+def _timelapse_na_camada(mapa, areas, imagens: tuple[bytes, ...] | None, indice_inicial: int = 0):
+    """Dois ImageOverlays no mesmo retângulo. A opacidade começa em zero e o JS revela o mês.
+
+    A URL embutida é sempre o primeiro quadro. O mês corrente chega por localStorage,
+    então o HTML do mapa não muda quando o usuário avança o timelapse.
+    """
+    del indice_inicial
     if not imagens:
-        return []
+        return None, None, None
     from gis.timelapse import bounds_painel, envelope
 
     caixa = envelope(areas)
     if caixa is None:
-        return []
+        return None, None, None
     west, south, east, north = caixa
     bounds = bounds_painel(west, south, east, north)
     grupo = folium.FeatureGroup(name="Timelapse", show=False)
-    overlays = []
-    total = len(imagens)
-    for i in range(total):
-        eh_inicial = (i == indice_inicial)
-        overlay = ImageOverlay(
-            _url_quadro(imagens, i),
-            bounds=bounds,
-            opacity=0.9 if eh_inicial else 0.0,
-            interactive=False,
-            cross_origin=False,
-            zindex=1,
-        )
-        overlay.add_to(grupo)
-        overlays.append(overlay)
+
+    url_inicial = _url_quadro(imagens, 0)
+
+    # Os dois buffers nascem invisíveis. O JS só revela o que já está decodificado.
+    overlay_a = ImageOverlay(
+        url_inicial,
+        bounds=bounds,
+        opacity=0.0,
+        interactive=False,
+        cross_origin=False,
+        zindex=2,
+        alt="",
+    )
+    overlay_a.add_to(grupo)
+
+    overlay_b = ImageOverlay(
+        url_inicial,
+        bounds=bounds,
+        opacity=0.0,
+        interactive=False,
+        cross_origin=False,
+        zindex=1,
+        alt="",
+    )
+    overlay_b.add_to(grupo)
+
     grupo.add_to(mapa)
-    return overlays
+    frames_urls = [_url_quadro(imagens, i) for i in range(len(imagens))]
+    return overlay_a, overlay_b, json.dumps(frames_urls)
 
 
 def _grafico_timelapse(serie: pd.DataFrame):
@@ -626,12 +745,14 @@ def _grafico_timelapse(serie: pd.DataFrame):
     st.plotly_chart(fig, use_container_width=True)
 
 
-def _timelapse_mes_menos(chave_idx: str) -> None:
+def _timelapse_mes_menos(chave_idx: str, cod_fazenda: int) -> None:
     st.session_state[chave_idx] = max(0, int(st.session_state.get(chave_idx, 0)) - 1)
+    _timelapse_touch(cod_fazenda)
 
 
-def _timelapse_mes_mais(chave_idx: str, limite: int) -> None:
+def _timelapse_mes_mais(chave_idx: str, limite: int, cod_fazenda: int) -> None:
     st.session_state[chave_idx] = min(limite, int(st.session_state.get(chave_idx, 0)) + 1)
+    _timelapse_touch(cod_fazenda)
 
 
 def _painel_timelapse(serie: pd.DataFrame, cod_fazenda: int):
@@ -683,6 +804,8 @@ def _painel_timelapse(serie: pd.DataFrame, cod_fazenda: int):
             step=0.25,
             key=vel_key,
             help="Quanto menor o intervalo, mais rápida a animação.",
+            on_change=_timelapse_touch,
+            args=(cod_fazenda,),
         )
     with c_gauge:
         _velocimetro_timelapse(st.session_state[vel_key])
@@ -694,7 +817,7 @@ def _painel_timelapse(serie: pd.DataFrame, cod_fazenda: int):
             key=f"tempo_prev_{cod_fazenda}",
             use_container_width=True,
             on_click=_timelapse_mes_menos,
-            args=(idx_key,),
+            args=(idx_key, cod_fazenda),
         )
     with c_slider:
         st.slider(
@@ -704,6 +827,8 @@ def _painel_timelapse(serie: pd.DataFrame, cod_fazenda: int):
             format="%d",
             key=idx_key,
             label_visibility="collapsed",
+            on_change=_timelapse_touch,
+            args=(cod_fazenda,),
         )
     with c_next:
         st.button(
@@ -711,7 +836,7 @@ def _painel_timelapse(serie: pd.DataFrame, cod_fazenda: int):
             key=f"tempo_next_{cod_fazenda}",
             use_container_width=True,
             on_click=_timelapse_mes_mais,
-            args=(idx_key, limite),
+            args=(idx_key, limite, cod_fazenda),
         )
 
     linha = serie.iloc[int(st.session_state[idx_key])]
@@ -750,6 +875,9 @@ def _painel_timelapse(serie: pd.DataFrame, cod_fazenda: int):
         "UA vem de Tab_categoria.Unidade_Animal por animal presente no mês."
     )
 
+
+def _complemento_timelapse(serie: pd.DataFrame, cod_fazenda: int) -> None:
+    """Faixas e gráfico ficam fora do relógio para não redesenhar a cada quadro."""
     st.markdown("**Faixas de cor dos indicadores** — ajuste os tetos de cada classe")
     faixas = st.columns(4)
     defs = [
@@ -916,7 +1044,17 @@ def _mapa_interativo(conn, store, cod_fazenda: int):
     rotulos.add_to(mapa)
     _RotulosPorZoom().add_to(mapa)
     folium.LayerControl(collapsed=False).add_to(mapa)
-    _PersistenciaTimelapse(int(cod_fazenda), timelapse_ativo, overlays_tl, indice_inicial=indice_tempo).add_to(mapa)
+    overlay_a = overlay_b = None
+    frames_json = None
+    if isinstance(overlays_tl, tuple) and len(overlays_tl) == 3 and overlays_tl[0] is not None:
+        overlay_a, overlay_b, frames_json = overlays_tl
+    _PersistenciaTimelapse(
+        int(cod_fazenda),
+        timelapse_ativo,
+        overlay_a,
+        overlay_b,
+        frames_json,
+    ).add_to(mapa)
 
     if media is None:
         st.caption("Ainda não há pesagem nos pastos com animal. As áreas ficam cinza.")
@@ -928,25 +1066,7 @@ def _mapa_interativo(conn, store, cod_fazenda: int):
             "Pasto sem animal ativo permanece cinza."
         )
     if int(cod_fazenda) == 4 and timelapse_ativo:
-        components.html(
-            f"""
-            <script>
-                (function() {{
-                    var idx = {indice_tempo};
-                    try {{
-                        localStorage.setItem('esopo_tl_idx_{cod_fazenda}', String(idx));
-                        if (window.BroadcastChannel) {{
-                            var bc = new BroadcastChannel('esopo_tl_channel_{cod_fazenda}');
-                            bc.postMessage({{type: 'FRAME_CHANGE', idx: idx}});
-                            bc.close();
-                        }}
-                    }} catch(e) {{}}
-                }})();
-            </script>
-            """,
-            height=0,
-            width=0,
-        )
+        _publicar_indice(cod_fazenda)
     clique = _desenhar(mapa, f"mapa-folium-{cod_fazenda}")
     if perimetro_id is not None:
         st.caption(
@@ -959,11 +1079,15 @@ def _mapa_interativo(conn, store, cod_fazenda: int):
         pass  # camada desabilitada — painel oculto
     elif serie_tempo is not None:
         st.caption("Ligue a camada **Timelapse** no quadro de camadas do mapa. O mês é o controle abaixo.")
-        _painel_timelapse(serie_tempo, cod_fazenda)
+        play_key = f"timelapse_play_{cod_fazenda}"
+        vel_key = f"timelapse_vel_{cod_fazenda}"
+        play_armado = bool(st.session_state.get(play_key, False))
+        vel_armada = round(float(st.session_state.get(vel_key, 2.0)), 2)
         st.fragment(
-            _autoplay_tick,
-            run_every=float(st.session_state.get(f"timelapse_vel_{cod_fazenda}", 2.0)),
-        )(cod_fazenda, len(serie_tempo) - 1)
+            _fragmento_timelapse,
+            run_every=vel_armada if play_armado else None,
+        )(serie_tempo, cod_fazenda, play_armado, vel_armada)
+        _complemento_timelapse(serie_tempo, cod_fazenda)
     elif erro_tempo:
         st.warning(f"Timelapse indisponível: {erro_tempo}")
     _tabela_indices(quadro, criterio, media)
