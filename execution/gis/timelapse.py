@@ -14,7 +14,7 @@ import subprocess
 from functools import lru_cache
 
 import pandas as pd
-from PIL import Image
+from PIL import Image, ImageDraw
 
 _MESES = [
     (2025, 1, "Janeiro / 2025", 2.75),
@@ -140,9 +140,59 @@ def _coleta(geometry, lons, lats):
             _coleta({"type": "Polygon", "coordinates": poly}, lons, lats)
 
 
-@lru_cache(maxsize=2)
-def quadros_jpeg(path: str, mtime: float) -> tuple[bytes, ...]:
-    del mtime
+def mascara_perimetro(areas: list[dict], tamanho: tuple[int, int]) -> Image.Image:
+    """Gera máscara alfa com bordas suaves (anti-aliasing 4x) a partir do perímetro dos pastos."""
+    from shapely.geometry import shape
+    from shapely.ops import unary_union
+
+    pw, ph = tamanho
+    if not areas:
+        return Image.new("L", (pw, ph), 255)
+
+    partes = []
+    for area in areas:
+        if str(area.get("situacao") or "") == "perimetro":
+            continue
+        try:
+            geom = shape(area["geojson"])
+            if not geom.is_empty:
+                partes.append(geom)
+        except Exception:
+            continue
+
+    if not partes:
+        return Image.new("L", (pw, ph), 255)
+
+    uniao = unary_union(partes)
+    if not uniao.is_valid:
+        uniao = uniao.buffer(0)
+
+    west, south, east, north = uniao.bounds
+    x1, y1, x2, y2 = _LIMITE
+    esquerda, topo, _dir, _base = _PAINEL
+
+    scale = 4
+    mask_hi = Image.new("L", (pw * scale, ph * scale), 0)
+    draw = ImageDraw.Draw(mask_hi)
+
+    def geo_to_pixel_hi(lon: float, lat: float) -> tuple[float, float]:
+        px = (x1 + (lon - west) / (east - west) * (x2 - x1) - esquerda) * scale
+        py = (y1 + (north - lat) / (north - south) * (y2 - y1) - topo) * scale
+        return (px, py)
+
+    geoms = [uniao] if uniao.geom_type == "Polygon" else list(uniao.geoms)
+    for poly in geoms:
+        coords = [geo_to_pixel_hi(x, y) for x, y in poly.exterior.coords]
+        draw.polygon(coords, fill=255)
+        for interior in poly.interiors:
+            icoords = [geo_to_pixel_hi(x, y) for x, y in interior.coords]
+            draw.polygon(icoords, fill=0)
+
+    return mask_hi.resize((pw, ph), Image.Resampling.LANCZOS)
+
+
+def quadros_recortados(path: str, areas: list[dict] | None = None) -> tuple[bytes, ...]:
+    """Extrai os quadros do vídeo, recorta no painel e aplica máscara transparente no perímetro."""
     import imageio_ffmpeg
 
     ffmpeg = imageio_ffmpeg.get_ffmpeg_exe()
@@ -154,14 +204,31 @@ def quadros_jpeg(path: str, mtime: float) -> tuple[bytes, ...]:
     imagens = _pngs(proc.stdout)
     if len(imagens) != len(_MESES):
         raise ValueError(f"O timelapse tem {len(imagens)} quadros; o esperado são {len(_MESES)} meses.")
+
+    esquerda, topo, direita, base = _PAINEL
+    tamanho_painel = (int(direita - esquerda), int(base - topo))
+    mask = mascara_perimetro(areas, tamanho_painel) if areas else None
+
     saida = []
     for blob in imagens:
         imagem = Image.open(io.BytesIO(blob)).convert("RGB")
         recorte = imagem.crop(_PAINEL)
-        buffer = io.BytesIO()
-        recorte.save(buffer, format="JPEG", quality=72, optimize=True)
+        if mask is not None:
+            rgba = recorte.convert("RGBA")
+            rgba.putalpha(mask)
+            buffer = io.BytesIO()
+            rgba.save(buffer, format="PNG", optimize=True)
+        else:
+            buffer = io.BytesIO()
+            recorte.save(buffer, format="PNG", optimize=True)
         saida.append(buffer.getvalue())
     return tuple(saida)
+
+
+def quadros_jpeg(path: str, mtime: float, areas: list[dict] | None = None) -> tuple[bytes, ...]:
+    """Apelido para retrocompatibilidade."""
+    del mtime
+    return quadros_recortados(path, areas)
 
 
 def _pngs(blob: bytes) -> list[bytes]:
