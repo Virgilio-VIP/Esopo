@@ -3,3 +3,10 @@ pandas
 python-dotenv
 streamlit
 plotly
+shapely
+pyproj
+folium
+streamlit-folium
+psycopg2-binary
+imageio-ffmpeg
+Pillow
